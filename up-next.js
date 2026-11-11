@@ -4,11 +4,14 @@
 
 function init() {
     $ui.register(function (ctx) {
-        var EXTRA_EPISODES = 2   // how many upcoming episodes to add after the existing card
+        var MAX_EXTRA = 40        // safety cap: max extra cards per show
+        var REFRESH_MS = 4000     // how often the home screen is re-checked
+        var SELECTOR = "[data-continue-watching-container] [data-episode-card]"
         var building = false
         var episodeCache = {}
+        var mediaMapCache = null
 
-        // ---------- AniList lookup (show title + banner fallback) ----------
+        // ---------- AniList lookup ----------
         function loadMediaMap() {
             var map = {}
             var collection = $anilist.getAnimeCollection(false)
@@ -19,11 +22,18 @@ function init() {
                     if (!m) return
                     map[String(m.id)] = {
                         title: (m.title && m.title.userPreferred) || "",
-                        image: m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || ""
+                        image: m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "",
+                        releasing: String(m.status) === "RELEASING",
+                        nextAiring: (m.nextAiringEpisode && Number(m.nextAiringEpisode.episode)) || 0
                     }
                 })
             })
             return map
+        }
+
+        function getMediaMap() {
+            if (!mediaMapCache) mediaMapCache = loadMediaMap()
+            return mediaMapCache
         }
 
         // ---------- Episode metadata (thumbnails, titles, runtime) ----------
@@ -53,6 +63,58 @@ function init() {
             return typeof rt === "number" ? rt + "m" : String(rt)
         }
 
+        // How far should the extra cards go?
+        function computeMax(ep, total, info, episodes) {
+            var max = total
+            if (info.releasing && info.nextAiring) {
+                var aired = info.nextAiring - 1
+                max = max ? Math.min(max, aired) : aired
+            }
+            if (!max) {
+                Object.keys(episodes).forEach(function (k) {
+                    var n = parseInt(k, 10)
+                    if (!isNaN(n) && n > max) max = n
+                })
+            }
+            if (!max) max = ep + 3
+            return Math.min(max, ep + MAX_EXTRA)
+        }
+
+        // ---------- Playing an episode ----------
+        function findLocalPath(entry, n) {
+            if (!entry) return ""
+            var eps = entry.episodes || []
+            for (var i = 0; i < eps.length; i++) {
+                var e = eps[i]
+                if (e && Number(e.episodeNumber) === n && e.localFile && e.localFile.path) return e.localFile.path
+            }
+            var files = entry.localFiles || []
+            for (var j = 0; j < files.length; j++) {
+                var f = files[j]
+                if (f && f.path && f.metadata && Number(f.metadata.episode) === n) return f.path
+            }
+            return ""
+        }
+
+        function openEpisode(mediaId, n) {
+            var id = Number(mediaId)
+            function fallback() { ctx.screen.navigateTo("/entry", { id: String(id) }) }
+            Promise.resolve().then(function () {
+                return ctx.anime.getAnimeEntry(id)
+            }).then(function (entry) {
+                var path = findLocalPath(entry, n)
+                if (!path) {
+                    ctx.toast.info("Episode " + n + " isn't in your library yet")
+                    return fallback()
+                }
+                ctx.playback.playUsingMediaPlayer(path)
+                ctx.toast.info("Playing episode " + n)
+            }).catch(function (err) {
+                console.log("up-next: could not play episode " + n + ": " + err)
+                fallback()
+            })
+        }
+
         // ---------- DOM helpers ----------
         function mk(tag, attrs, styles) {
             return ctx.dom.createElement(tag).then(function (e) {
@@ -62,7 +124,7 @@ function init() {
             })
         }
 
-        function buildSlide(mediaId, ep, total, info, meta) {
+        function buildSlide(mediaId, ep, baseEp, total, info, meta) {
             var image = (meta && meta.image) || info.image || ""
             var epTitle = pickTitle(meta)
             var runtime = pickRuntime(meta)
@@ -71,24 +133,34 @@ function init() {
                 mk("div", {
                     role: "group",
                     "data-up-next-for": String(mediaId),
+                    "data-up-next-base": String(baseEp),
                     "class": "UI-Carousel__item min-w-0 shrink-0 grow-0 basis-full pl-4 md:basis-1/2 lg:basis-1/2 2xl:basis-1/3 min-[2000px]:basis-1/4"
-                }),                                                                                             // 0 slide
-                mk("div", { "class": "rounded-xl space-y-2 flex-none cursor-pointer select-none w-full" }),     // 1 card
+                }),                                                                                              // 0 slide
+                mk("div", { "class": "rounded-xl space-y-2 flex-none group/episode-card cursor-pointer select-none w-full" }), // 1 card
                 mk("div", { "class": "w-full h-full rounded-xl overflow-hidden z-[1] aspect-[4/2] relative bg-[--background]" }), // 2 image box
                 mk("img", {
                     alt: "", decoding: "async", loading: "lazy", src: image,
-                    "class": "object-cover rounded-xl object-center"
-                }, { position: "absolute", height: "100%", width: "100%", inset: "0px", color: "transparent" }),  // 3 img
+                    "class": "object-cover rounded-xl object-center transition-[opacity,transform] ease-out duration-400 opacity-100 scale-100 lg:group-hover/episode-card:scale-[1.02]"
+                }, { position: "absolute", height: "100%", width: "100%", inset: "0px", color: "transparent" }),   // 3 img
                 mk("div", { "class": "z-[1] absolute inset-x-0 bottom-0 w-full h-full opacity-90 md:h-[80%] bg-gradient-to-t from-[#0c0c0c] to-transparent rounded-b-xl" }), // 4 gradient
-                mk("div", { "class": "absolute bottom-0 left-0 w-full h-fit z-[3] p-3" }),                      // 5 info box
-                mk("div", { "class": "relative z-[3] w-full space-y-0" }),                                       // 6 info container
+                mk("div", { "class": "absolute bottom-0 left-0 w-full h-fit z-[3] p-3" }),                       // 5 info box
+                mk("div", { "class": "relative z-[3] w-full space-y-0" }),                                        // 6 info container
                 mk("p", { "class": "w-[80%] line-clamp-1 md:text-lg font-semibold text-sm max-w-[80%] text-white/60" }), // 7 title
-                mk("div", { "class": "w-full justify-between flex flex-none items-center" }),                    // 8 content row
-                mk("p", { "class": "line-clamp-1 flex items-center" }),                                          // 9 subtitle
-                mk("span", { "class": "flex-none text-base md:text-xl font-medium" }),                           // 10 "Episode N"
-                mk("span", { "class": "opacity-40" }),                                                           // 11 " / total"
-                mk("span", { "class": "text-[--muted] text-base md:text-lg ml-2 font-normal line-clamp-1" }),    // 12 show title
-                mk("p", { "class": "text-[--muted] flex-none ml-2 text-sm md:text-base line-clamp-2 text-right" }) // 13 runtime
+                mk("div", { "class": "w-full justify-between flex flex-none items-center" }),                     // 8 content row
+                mk("p", { "class": "line-clamp-1 flex items-center" }),                                           // 9 subtitle
+                mk("span", { "class": "flex-none text-base md:text-xl font-medium" }),                            // 10 "Episode N"
+                mk("span", { "class": "opacity-40" }),                                                            // 11 " / total"
+                mk("span", { "class": "text-[--muted] text-base md:text-lg ml-2 font-normal line-clamp-1" }),     // 12 show title
+                mk("p", { "class": "text-[--muted] flex-none ml-2 text-sm md:text-base line-clamp-2 text-right" }), // 13 runtime
+                mk("div", { "class": "group-hover/episode-card:opacity-100 cursor-pointer opacity-0 transition-opacity bg-gray-950 bg-opacity-60 z-[2] absolute inset-0 items-center justify-center hidden md:flex" }), // 14 hover overlay
+                mk("div", {}, {
+                    width: "4rem", height: "4rem", "border-radius": "9999px", background: "rgba(229,231,235,0.55)",
+                    display: "flex", "align-items": "center", "justify-content": "center"
+                }),                                                                                               // 15 play circle
+                mk("div", {}, {
+                    width: "0", height: "0", "border-top": "14px solid transparent", "border-bottom": "14px solid transparent",
+                    "border-left": "22px solid rgba(17,24,39,0.85)", "margin-left": "6px"
+                })                                                                                                // 16 play triangle
             ]).then(function (e) {
                 e[7].setText(epTitle || "Up next")
                 e[10].setText("Episode " + ep)
@@ -104,70 +176,103 @@ function init() {
                 e[6].append(e[7])
                 e[6].append(e[8])
                 e[5].append(e[6])
+                e[15].append(e[16])
+                e[14].append(e[15])
                 e[2].append(e[3])
                 e[2].append(e[4])
                 e[2].append(e[5])
+                e[2].append(e[14])
                 e[1].append(e[2])
                 e[0].append(e[1])
 
-                e[0].addEventListener("click", function () {
-                    ctx.screen.navigateTo("/entry", { id: String(mediaId) })
-                })
+                e[0].addEventListener("click", function () { openEpisode(mediaId, ep) })
                 return e[0]
             })
         }
 
-        function processCard(card, mediaMap) {
-            return card.getAttributes().then(function (attrs) {
-                var mediaId = attrs["data-media-id"]
-                var ep = parseInt(attrs["data-episode-number"], 10)
-                var total = parseInt(attrs["data-progress-total"], 10) || 0
-                if (!mediaId || isNaN(ep)) return
-                var info = mediaMap[mediaId] || { title: "", image: "" }
-
-                return getEpisodes(mediaId).then(function (episodes) {
-                    return card.getParent().then(function (span) {
-                        return span.getParent()          // card -> span -> carousel slide
-                    }).then(function (baseSlide) {
-                        var prev = baseSlide
-                        var chain = Promise.resolve()
-                        for (var i = 1; i <= EXTRA_EPISODES; i++) {
-                            (function (n) {
-                                if (total && n > total) return
-                                chain = chain.then(function () {
-                                    return buildSlide(mediaId, n, total, info, episodes[String(n)]).then(function (s) {
-                                        prev.after(s)
-                                        prev = s
-                                    })
-                                })
-                            })(ep + i)
-                        }
-                        return chain
+        // ---------- Sync the home screen ----------
+        function removeStale(activeIds) {
+            return ctx.dom.query("[data-up-next-for]").then(function (slides) {
+                return Promise.all(slides.map(function (s) {
+                    return s.getAttribute("data-up-next-for").then(function (id) {
+                        if (activeIds.indexOf(id) === -1) s.remove()
                     })
+                }))
+            })
+        }
+
+        function build(card, mediaId, ep, total) {
+            var info = getMediaMap()[mediaId] || { title: "", image: "", releasing: false, nextAiring: 0 }
+            return getEpisodes(mediaId).then(function (episodes) {
+                var max = computeMax(ep, total, info, episodes)
+                return card.getParent().then(function (span) {
+                    return span.getParent()                  // card -> span -> carousel slide
+                }).then(function (baseSlide) {
+                    // let the row scroll sideways (carousel only knows about the first slide)
+                    baseSlide.getParent().then(function (inner) { return inner.getParent() }).then(function (content) {
+                        content.setStyle("overflow-x", "auto")
+                        content.setStyle("scrollbar-width", "thin")
+                    })
+                    var prev = baseSlide
+                    var chain = Promise.resolve()
+                    for (var n = ep + 1; n <= max; n++) {
+                        (function (num) {
+                            chain = chain.then(function () {
+                                return buildSlide(mediaId, num, ep, total, info, episodes[String(num)]).then(function (s) {
+                                    prev.after(s)
+                                    prev = s
+                                })
+                            })
+                        })(n)
+                    }
+                    return chain
                 })
             })
         }
 
-        // ---------- Home screen: add the extra cards ----------
-        ctx.dom.onReady(function () {
-            ctx.dom.observe("[data-continue-watching-container] [data-episode-card]", function (cards) {
-                if (building || !cards || cards.length === 0) return
-                building = true
-                ctx.dom.query("[data-up-next-for]").then(function (existing) {
-                    if (existing.length > 0) return          // already added on this render
-                    var mediaMap = loadMediaMap()
-                    var chain = Promise.resolve()
-                    cards.forEach(function (c) {
-                        chain = chain.then(function () { return processCard(c, mediaMap) })
-                    })
-                    return chain
-                }).then(function () {
-                    building = false
-                }, function (err) {
-                    building = false
-                    console.log("up-next error: " + err)
+        function processCard(card, attrs) {
+            var mediaId = attrs["data-media-id"]
+            var ep = parseInt(attrs["data-episode-number"], 10)
+            var total = parseInt(attrs["data-progress-total"], 10) || 0
+            if (!mediaId || isNaN(ep)) return Promise.resolve()
+            var sel = '[data-up-next-for="' + mediaId + '"]'
+            return ctx.dom.query(sel + '[data-up-next-base="' + ep + '"]').then(function (fresh) {
+                if (fresh.length > 0) return                 // already up to date
+                return ctx.dom.query(sel).then(function (old) {
+                    old.forEach(function (s) { s.remove() })  // progress changed -> rebuild
+                    return build(card, mediaId, ep, total)
                 })
             })
+        }
+
+        function sync(cards) {
+            if (building) return
+            building = true
+            mediaMapCache = null
+            var list = cards || []
+            Promise.all(list.map(function (c) { return c.getAttributes() })).then(function (allAttrs) {
+                var ids = allAttrs.map(function (a) { return a["data-media-id"] })
+                return removeStale(ids).then(function () {
+                    var chain = Promise.resolve()
+                    list.forEach(function (c, i) {
+                        chain = chain.then(function () { return processCard(c, allAttrs[i]) })
+                    })
+                    return chain
+                })
+            }).then(function () {
+                building = false
+            }, function (err) {
+                building = false
+                console.log("up-next error: " + err)
+            })
+        }
+
+        ctx.dom.onReady(function () {
+            var obs = ctx.dom.observe(SELECTOR, sync)
+            var refetch = obs && obs[1]
+            if (typeof ctx.setInterval === "function" && typeof refetch === "function") {
+                ctx.setInterval(function () { refetch() }, REFRESH_MS)
+            }
         })
 
         // ---------- Tray panel ----------
@@ -212,9 +317,9 @@ function init() {
                 return tray.flex([
                     tray.text(r.title + " - Episode " + r.ep + (r.total ? " / " + r.total : "")),
                     tray.button({
-                        label: "Open",
+                        label: "Play",
                         onClick: ctx.eventHandler("open-" + r.mediaId + "-" + r.ep, function () {
-                            ctx.screen.navigateTo("/entry", { id: String(r.mediaId) })
+                            openEpisode(r.mediaId, r.ep)
                         })
                     })
                 ])
