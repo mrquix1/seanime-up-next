@@ -6,8 +6,9 @@ function init() {
     $ui.register(function (ctx) {
         var EXTRA_EPISODES = 2   // how many upcoming episodes to add after the existing card
         var building = false
+        var episodeCache = {}
 
-        // ---------- AniList lookup (title + image per show) ----------
+        // ---------- AniList lookup (show title + banner fallback) ----------
         function loadMediaMap() {
             var map = {}
             var collection = $anilist.getAnimeCollection(false)
@@ -25,6 +26,33 @@ function init() {
             return map
         }
 
+        // ---------- Episode metadata (thumbnails, titles, runtime) ----------
+        function getEpisodes(mediaId) {
+            if (episodeCache[mediaId]) return Promise.resolve(episodeCache[mediaId])
+            return fetch("https://api.ani.zip/mappings?anilist_id=" + mediaId)
+                .then(function (res) { return Promise.resolve(res.json()) })
+                .then(function (data) {
+                    var eps = (data && data.episodes) || {}
+                    episodeCache[mediaId] = eps
+                    return eps
+                }, function (err) {
+                    console.log("up-next: metadata fetch failed: " + err)
+                    return {}
+                })
+        }
+
+        function pickTitle(meta) {
+            if (!meta || !meta.title) return ""
+            if (typeof meta.title === "string") return meta.title
+            return meta.title.en || meta.title["x-jat"] || meta.title.ja || ""
+        }
+
+        function pickRuntime(meta) {
+            var rt = meta && (meta.runtime || meta.length)
+            if (!rt) return ""
+            return typeof rt === "number" ? rt + "m" : String(rt)
+        }
+
         // ---------- DOM helpers ----------
         function mk(tag, attrs, styles) {
             return ctx.dom.createElement(tag).then(function (e) {
@@ -34,34 +62,58 @@ function init() {
             })
         }
 
-        function buildSlide(mediaId, ep, total, info) {
-            var bg = info.image ? { "background-image": "url(" + info.image + ")", "background-size": "cover", "background-position": "center" } : {}
+        function buildSlide(mediaId, ep, total, info, meta) {
+            var image = (meta && meta.image) || info.image || ""
+            var epTitle = pickTitle(meta)
+            var runtime = pickRuntime(meta)
+
             return Promise.all([
                 mk("div", {
                     role: "group",
                     "data-up-next-for": String(mediaId),
                     "class": "UI-Carousel__item min-w-0 shrink-0 grow-0 basis-full pl-4 md:basis-1/2 lg:basis-1/2 2xl:basis-1/3 min-[2000px]:basis-1/4"
-                }),
-                mk("div", { "class": "rounded-xl space-y-2 flex-none cursor-pointer select-none w-full" }),
-                mk("div", { "class": "w-full h-full rounded-xl overflow-hidden aspect-[4/2] relative bg-[--background]" }, bg),
-                mk("div", { "class": "absolute inset-x-0 bottom-0 w-full h-full opacity-90 md:h-[80%] bg-gradient-to-t from-[#0c0c0c] to-transparent rounded-b-xl" }),
-                mk("div", { "class": "absolute bottom-0 left-0 w-full h-fit z-[3] p-3" }),
-                mk("p", { "class": "w-[80%] line-clamp-1 md:text-lg font-semibold text-sm text-white/60" }),
-                mk("p", { "class": "line-clamp-1 text-base md:text-xl font-medium" })
-            ]).then(function (els) {
-                var slide = els[0], card = els[1], box = els[2], grad = els[3], infoBox = els[4], l1 = els[5], l2 = els[6]
-                l1.setText("Up next")
-                l2.setText("Episode " + ep + (total ? " / " + total : "") + (info.title ? " - " + info.title : ""))
-                infoBox.append(l1)
-                infoBox.append(l2)
-                box.append(grad)
-                box.append(infoBox)
-                card.append(box)
-                slide.append(card)
-                slide.addEventListener("click", function () {
+                }),                                                                                             // 0 slide
+                mk("div", { "class": "rounded-xl space-y-2 flex-none cursor-pointer select-none w-full" }),     // 1 card
+                mk("div", { "class": "w-full h-full rounded-xl overflow-hidden z-[1] aspect-[4/2] relative bg-[--background]" }), // 2 image box
+                mk("img", {
+                    alt: "", decoding: "async", loading: "lazy", src: image,
+                    "class": "object-cover rounded-xl object-center"
+                }, { position: "absolute", height: "100%", width: "100%", inset: "0px", color: "transparent" }),  // 3 img
+                mk("div", { "class": "z-[1] absolute inset-x-0 bottom-0 w-full h-full opacity-90 md:h-[80%] bg-gradient-to-t from-[#0c0c0c] to-transparent rounded-b-xl" }), // 4 gradient
+                mk("div", { "class": "absolute bottom-0 left-0 w-full h-fit z-[3] p-3" }),                      // 5 info box
+                mk("div", { "class": "relative z-[3] w-full space-y-0" }),                                       // 6 info container
+                mk("p", { "class": "w-[80%] line-clamp-1 md:text-lg font-semibold text-sm max-w-[80%] text-white/60" }), // 7 title
+                mk("div", { "class": "w-full justify-between flex flex-none items-center" }),                    // 8 content row
+                mk("p", { "class": "line-clamp-1 flex items-center" }),                                          // 9 subtitle
+                mk("span", { "class": "flex-none text-base md:text-xl font-medium" }),                           // 10 "Episode N"
+                mk("span", { "class": "opacity-40" }),                                                           // 11 " / total"
+                mk("span", { "class": "text-[--muted] text-base md:text-lg ml-2 font-normal line-clamp-1" }),    // 12 show title
+                mk("p", { "class": "text-[--muted] flex-none ml-2 text-sm md:text-base line-clamp-2 text-right" }) // 13 runtime
+            ]).then(function (e) {
+                e[7].setText(epTitle || "Up next")
+                e[10].setText("Episode " + ep)
+                e[11].setText(total ? " / " + total : "")
+                e[12].setText(info.title ? "- " + info.title : "")
+                e[13].setText(runtime)
+
+                e[10].append(e[11])
+                e[9].append(e[10])
+                e[9].append(e[12])
+                e[8].append(e[9])
+                e[8].append(e[13])
+                e[6].append(e[7])
+                e[6].append(e[8])
+                e[5].append(e[6])
+                e[2].append(e[3])
+                e[2].append(e[4])
+                e[2].append(e[5])
+                e[1].append(e[2])
+                e[0].append(e[1])
+
+                e[0].addEventListener("click", function () {
                     ctx.screen.navigateTo("/entry", { id: String(mediaId) })
                 })
-                return slide
+                return e[0]
             })
         }
 
@@ -73,23 +125,25 @@ function init() {
                 if (!mediaId || isNaN(ep)) return
                 var info = mediaMap[mediaId] || { title: "", image: "" }
 
-                return card.getParent().then(function (span) {
-                    return span.getParent()          // card -> span -> carousel slide
-                }).then(function (baseSlide) {
-                    var prev = baseSlide
-                    var chain = Promise.resolve()
-                    for (var i = 1; i <= EXTRA_EPISODES; i++) {
-                        (function (n) {
-                            if (total && n > total) return
-                            chain = chain.then(function () {
-                                return buildSlide(mediaId, n, total, info).then(function (s) {
-                                    prev.after(s)
-                                    prev = s
+                return getEpisodes(mediaId).then(function (episodes) {
+                    return card.getParent().then(function (span) {
+                        return span.getParent()          // card -> span -> carousel slide
+                    }).then(function (baseSlide) {
+                        var prev = baseSlide
+                        var chain = Promise.resolve()
+                        for (var i = 1; i <= EXTRA_EPISODES; i++) {
+                            (function (n) {
+                                if (total && n > total) return
+                                chain = chain.then(function () {
+                                    return buildSlide(mediaId, n, total, info, episodes[String(n)]).then(function (s) {
+                                        prev.after(s)
+                                        prev = s
+                                    })
                                 })
-                            })
-                        })(ep + i)
-                    }
-                    return chain
+                            })(ep + i)
+                        }
+                        return chain
+                    })
                 })
             })
         }
@@ -116,7 +170,7 @@ function init() {
             })
         })
 
-        // ---------- Tray panel (unchanged, debug line removed) ----------
+        // ---------- Tray panel ----------
         var tray = ctx.newTray({
             tooltipText: "Up next",
             iconUrl: "https://seanime.rahim.app/logo_2.png",
