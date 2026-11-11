@@ -1,5 +1,5 @@
 {
-    "version": "0.1.3",
+    "version": "0.2.0",
     "id": "up-next",
     "name": "Up Next",
     "description": "Shows the next few episodes of each show you're currently watching",
@@ -10,6 +10,13 @@
     "payloadURI": "https://raw.githubusercontent.com/mrquix1/seanime-up-next/main/up-next.js",
     "plugin": {
         "version": "1",
-        "permissions": { "scopes": ["anilist"] }
+        "permissions": {
+            "scopes": ["anilist"],
+            "allow": {
+                "networkAccess": {
+                    "allowedDomains": ["api.ani.zip"]
+                }
+            }
+        }
     }
 }
