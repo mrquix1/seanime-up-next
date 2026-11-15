@@ -239,8 +239,8 @@ function init() {
                 })                                                                                                // 16 play triangle
             ]).then(function (e) {
                 e[7].setText(epTitle || "Up next")
-                e[10].setText("Episode " + ep)
-                e[11].setText(total ? " / " + total : "")
+                e[10].setText("EP " + ep)
+                e[11].setText("")
                 e[12].setText(info.title ? "- " + info.title : "")
                 e[13].setText(runtime)
 
@@ -309,7 +309,7 @@ function init() {
             hero.cover.setAttribute("src", (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "")
             hero.title.setText((m.title && m.title.userPreferred) || "")
             hero.genres.setText((m.genres || []).slice(0, 3).join(" • "))
-            hero.score.setText(score ? "★ " + score : "")
+            hero.score.setText(score)
             hero.desc.setText(stripHtml(m.description))
             hero.dots.forEach(function (d, n) { d.setAttribute("data-active", n === heroIndex ? "true" : "false") })
             hero.mediaId = m.id
@@ -364,7 +364,7 @@ function init() {
                 mk("h1", { "class": "mq-hero-title" }),                   // 6 title
                 mk("div", { "class": "mq-hero-meta" }),                   // 7 meta row
                 mk("span", {}),                                           // 8 genres
-                mk("span", {}),                                           // 9 score
+                mk("span", { "class": "mq-hero-score" }),                    // 9 score
                 mk("p", { "class": "mq-hero-desc" }),                     // 10 synopsis
                 mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons row
                 mk("button", { "class": "mq-hero-btn" }),                 // 12 info
@@ -734,13 +734,34 @@ function init() {
             })
         }
 
+        function upsertEpBadge(mid, ep, key) {
+            return ctx.dom.query('.mq-ep-badge[data-mq-ep="' + key + '"]').then(function (found) {
+                if (found.length) return
+                var target = '[data-episode-card][data-media-id="' + mid + '"][data-episode-number="' + ep + '"] [class*="bottom-0 left-0 w-full"]'
+                return ctx.dom.query(target).then(function (boxes) {
+                    if (!boxes.length) return
+                    return mk("span", { "class": "mq-ep-badge", "data-mq-ep": key }).then(function (b) {
+                        b.setText("EP " + ep)
+                        boxes[0].append(b)
+                    })
+                })
+            })
+        }
+
         function applyProgress() {
             if (progBusy) return
             progBusy = true
             ctx.dom.query(SELECTOR).then(function (cards) {
                 return Promise.all(cards.map(function (c) { return c.getAttributes() })).then(function (all) {
                     var active = {}
+                    var epActive = {}
                     var work = Promise.resolve()
+                    all.forEach(function (a) {
+                        var m = a["data-media-id"], n = a["data-episode-number"]
+                        if (!m || !n) return
+                        epActive[m + ":" + n] = true
+                        work = work.then(function () { return upsertEpBadge(m, n, m + ":" + n) })
+                    })
                     all.forEach(function (a) {
                         var mid = a["data-media-id"]
                         var ep = a["data-episode-number"]
@@ -759,6 +780,14 @@ function init() {
                             return Promise.all(els.map(function (el) {
                                 return el.getAttribute("data-mq-key").then(function (k) {
                                     if (!active[k]) el.remove()
+                                })
+                            }))
+                        })
+                    }).then(function () {
+                        return ctx.dom.query("[data-mq-ep]").then(function (els) {
+                            return Promise.all(els.map(function (el) {
+                                return el.getAttribute("data-mq-ep").then(function (k) {
+                                    if (!epActive[k]) el.remove()
                                 })
                             }))
                         })
@@ -876,7 +905,7 @@ function init() {
             heroTick()
             latestTick()
             applyProgress()
-            tidySidebar()
+            navTick()
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -905,6 +934,7 @@ function init() {
             }
 
             ctx.screen.onNavigate(function (e) {
+                if (e && e.pathname) { currentPath = e.pathname; setNavActive() }
                 if (e && e.pathname === "/") {
                     tick("navigate")
                     if (typeof ctx.setTimeout === "function") {
@@ -915,6 +945,7 @@ function init() {
                 }
             })
 
+            try { if (typeof ctx.screen.loadCurrent === "function") ctx.screen.loadCurrent() } catch (err) {}
             tick("ready")
         })
 
@@ -991,34 +1022,64 @@ function init() {
                 // watch progress: read the playback position, save it, and draw it on the cards
                 ctx.setInterval(pollProgress, 3000)
                 ctx.setInterval(function () { flushProgress(); applyProgress() }, 3000)
-                ctx.setInterval(tidySidebar, 2000)
+                ctx.setInterval(navTick, 2000)
             }
         }
 
-        // ---------- Sidebar: keep only a few buttons ----------
-        // Links (by address) that stay in the sidebar. Everything else in the menu is hidden.
-        // The first time it runs, the log shows every sidebar link ("up-next: sidebar: links = ..."),
-        // so you can add or remove addresses here.
-        var SIDEBAR_KEEP = ["/", "/schedule", "/lists", "/discover", "/torrent-list", "/settings"]
-        var sidebarLogged = false
-        var sidebarBusy = false
+        // ---------- Sidebar: our own navigation (6 buttons) ----------
+        // The plugin adds these buttons to the sidebar. The CSS hides Seanime's own menu once they exist.
+        // Change the list to add, remove or reorder buttons (icons: calendar, home, compass, library, download, settings).
+        var NAV = [
+            { href: "/schedule", icon: "calendar", title: "Schedule" },
+            { href: "/", icon: "home", title: "Home" },
+            { href: "/discover", icon: "compass", title: "Discover" },
+            { href: "/lists", icon: "library", title: "My lists" },
+            { href: "/torrent-list", icon: "download", title: "Torrent list" },
+            { href: "/settings", icon: "settings", title: "Settings" }
+        ]
+        var navBusy = false
+        var currentPath = "/"
 
-        function tidySidebar() {
-            if (sidebarBusy) return
-            sidebarBusy = true
-            ctx.dom.query(".UI-AppSidebar__sidebar .UI-VerticalMenu__item").then(function (items) {
-                return Promise.all(items.map(function (it) {
-                    return Promise.resolve(it.getAttribute("href")).then(function (h) { return { it: it, href: String(h || "").split("?")[0].replace(/(.)\/$/, "$1") } })
-                })).then(function (list) {
-                    if (!sidebarLogged && list.length) {
-                        sidebarLogged = true
-                        log("sidebar: links = " + list.map(function (x) { return x.href || "(button)" }).join("  "))
-                    }
-                    list.forEach(function (x) {
-                        if (!x.href || SIDEBAR_KEEP.indexOf(x.href) === -1) x.it.setStyle("display", "none")
+        function setNavActive() {
+            ctx.dom.query("[data-mq-href]").then(function (items) {
+                items.forEach(function (it) {
+                    it.getAttribute("data-mq-href").then(function (h) {
+                        var on = h === "/" ? currentPath === "/" : (currentPath === h || currentPath.indexOf(h + "/") === 0)
+                        it.setAttribute("data-active", on ? "true" : "false")
                     })
                 })
-            }).then(function () { sidebarBusy = false }, function (err) { sidebarBusy = false; log("sidebar tidy failed: " + err) })
+            }).catch(function () {})
+        }
+
+        function buildNav(sidebar) {
+            var parts = [mk("div", { "class": "mq-nav", "data-mq-nav": "1" })]
+            NAV.forEach(function (n) {
+                parts.push(Promise.all([
+                    mk("button", { "class": "mq-nav-item", "data-mq-href": n.href, "data-active": "false", title: n.title }),
+                    mk("span", { "class": "mq-nav-icon", "data-icon": n.icon })
+                ]))
+            })
+            return Promise.all(parts).then(function (p) {
+                var root = p[0]
+                NAV.forEach(function (n, i) {
+                    var pair = p[i + 1]
+                    pair[0].append(pair[1])
+                    pair[0].addEventListener("click", function () { currentPath = n.href; setNavActive(); ctx.screen.navigateTo(n.href) })
+                    root.append(pair[0])
+                })
+                sidebar.append(root)
+            }).then(function () { setNavActive() })
+        }
+
+        function navTick() {
+            if (navBusy) return
+            navBusy = true
+            Promise.all([ctx.dom.query(".UI-AppSidebar__sidebar"), ctx.dom.query("[data-mq-nav]")]).then(function (r) {
+                if (!r[0].length) return
+                if (r[1].length === 1) return
+                r[1].forEach(function (el) { el.remove() })
+                return buildNav(r[0][0])
+            }).then(function () { navBusy = false }, function (err) { navBusy = false; log("nav failed: " + err) })
         }
 
         loadProgress()
