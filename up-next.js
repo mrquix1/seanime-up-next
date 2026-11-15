@@ -70,7 +70,8 @@ function init() {
                         title: (m.title && m.title.userPreferred) || "",
                         image: m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "",
                         releasing: String(m.status) === "RELEASING",
-                        nextAiring: (m.nextAiringEpisode && Number(m.nextAiringEpisode.episode)) || 0
+                        nextAiring: (m.nextAiringEpisode && Number(m.nextAiringEpisode.episode)) || 0,
+                        progress: Number(entry.progress) || 0
                     }
                 })
             })
@@ -278,7 +279,7 @@ function init() {
         function loadHeroData() {
             if (heroData || heroLoading || Date.now() < heroRetryAt) return Promise.resolve()
             heroLoading = true
-            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } trailer { id site } } } }"
+            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } episodes duration } } }"
             return fetch("https://graphql.anilist.co", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -319,15 +320,15 @@ function init() {
             hero.plus.setAttribute("data-added", inList ? "true" : "false")
             hero.plus.setAttribute("title", inList ? "On your list" : "Add to your list (Planning)")
 
-            // trailer card
-            var yt = (m.trailer && String(m.trailer.site).toLowerCase() === "youtube" && m.trailer.id) ? String(m.trailer.id) : ""
-            if (yt) {
-                hero.trailer.setAttribute("href", "https://www.youtube.com/watch?v=" + yt)
-                hero.trailerImg.setAttribute("src", "https://img.youtube.com/vi/" + yt + "/hqdefault.jpg")
-                hero.trailer.setStyle("display", "block")
-            } else {
-                hero.trailer.setStyle("display", "none")
-            }
+            // episode card on the right: "Episode N / total" + runtime
+            var mine = null
+            try { mine = getMediaMap()[String(m.id)] } catch (e) {}
+            var nextEp = mine ? mine.progress + 1 : 1
+            if (m.episodes && nextEp > m.episodes) nextEp = m.episodes
+            hero.epNumber = nextEp
+            hero.epLabel.setText("Episode " + nextEp + (m.episodes ? " / " + m.episodes : ""))
+            hero.epRuntime.setText(m.duration ? m.duration + "m" : "")
+            hero.epImg.setAttribute("src", m.bannerImage || "")
         }
 
         function heroAdd() {
@@ -365,7 +366,7 @@ function init() {
                 mk("span", {}),                                           // 8 genres
                 mk("span", {}),                                           // 9 score
                 mk("p", { "class": "mq-hero-desc" }),                     // 10 synopsis
-                mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons
+                mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons row
                 mk("button", { "class": "mq-hero-btn" }),                 // 12 info
                 mk("div", { "class": "mq-hero-nav" }),                    // 13 arrows box
                 mk("button", { "class": "mq-hero-arrow" }),               // 14 prev
@@ -373,24 +374,25 @@ function init() {
                 mk("div", { "class": "mq-hero-dots" }),                   // 16 dots box
                 Promise.all(dots),                                        // 17 dots
                 mk("button", { "class": "mq-hero-btn mq-hero-plus", "data-added": "false", title: "Add to your list" }), // 18 + button
-                mk("a", { "class": "mq-hero-trailer", target: "_blank", rel: "noopener noreferrer" }),                  // 19 trailer card (link)
-                mk("img", { "class": "mq-hero-trailer-img", alt: "" }),   // 20 trailer thumbnail
-                mk("div", { "class": "mq-hero-trailer-play" }),           // 21 play button
-                mk("span", { "class": "mq-hero-trailer-label" })          // 22 "Trailer" label
+                mk("div", { "class": "mq-hero-ep" }),                     // 19 episode card
+                mk("img", { "class": "mq-hero-ep-img", alt: "" }),        // 20 episode thumbnail
+                mk("div", { "class": "mq-hero-ep-shade" }),               // 21 dark gradient
+                mk("div", { "class": "mq-hero-ep-play" }),                // 22 play triangle
+                mk("span", { "class": "mq-hero-ep-label" }),              // 23 "Episode N / T"
+                mk("span", { "class": "mq-hero-ep-runtime" })             // 24 "24m"
             ]).then(function (e) {
-                e[12].setText("Info")
-                e[14].setText("‹")
-                e[15].setText("›")
+                e[12].setText("ⓘ  Info")
+                e[14].setText("←")
+                e[15].setText("→")
                 e[18].setText("+")
-                e[22].setText("Trailer")
 
                 e[7].append(e[8]); e[7].append(e[9])
-                e[11].append(e[12]); e[11].append(e[18])
                 e[17].forEach(function (d) { e[16].append(d) })
-                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[16])
+                e[11].append(e[12]); e[11].append(e[18]); e[11].append(e[16])
+                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11])
                 e[3].append(e[4]); e[3].append(e[5])
                 e[13].append(e[14]); e[13].append(e[15])
-                e[19].append(e[20]); e[19].append(e[21]); e[19].append(e[22])
+                e[19].append(e[20]); e[19].append(e[21]); e[19].append(e[22]); e[19].append(e[23]); e[19].append(e[24])
                 e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13]); e[0].append(e[19])
 
                 e[12].addEventListener("click", function () {
@@ -402,11 +404,16 @@ function init() {
                 e[17].forEach(function (d, k) {
                     d.addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(k) })
                 })
-                e[19].addEventListener("click", function () { heroPausedUntil = Date.now() + 60000 })
+                // episode card: play the next episode if the show is on your list, otherwise open its page
+                e[19].addEventListener("click", function () {
+                    if (!hero || !hero.mediaId) return
+                    if (isInList(hero.mediaId)) openEpisode(hero.mediaId, hero.epNumber || 1)
+                    else ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
+                })
 
                 hero = {
                     root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17],
-                    plus: e[18], trailer: e[19], trailerImg: e[20], mediaId: 0
+                    plus: e[18], epImg: e[20], epLabel: e[23], epRuntime: e[24], epNumber: 1, mediaId: 0
                 }
                 showHero(heroIndex)
                 anchor.after(e[0])
@@ -534,11 +541,16 @@ function init() {
                 }),                                                       // 0 root
                 mk("h2", { "class": "mq-latest-title" }),                 // 1 heading
                 mk("div", { "class": "mq-latest-row" }),                  // 2 scrolling row
-                Promise.all(latestData.map(buildLatestCard))              // 3 cards
+                Promise.all(latestData.map(buildLatestCard)),             // 3 cards
+                mk("div", { "class": "mq-latest-head" }),                 // 4 heading row
+                mk("span", { "class": "mq-latest-more" })                 // 5 "View more"
             ]).then(function (e) {
                 e[1].setText("Latest Episodes")
+                e[5].setText("View more ›")
+                e[5].addEventListener("click", function () { ctx.screen.navigateTo("/schedule") })
                 e[3].forEach(function (c) { e[2].append(c) })
-                e[0].append(e[1]); e[0].append(e[2])
+                e[4].append(e[1]); e[4].append(e[5])
+                e[0].append(e[4]); e[0].append(e[2])
                 anchor.after(e[0])
             })
         }
@@ -980,6 +992,26 @@ function init() {
                 ctx.setInterval(function () { flushProgress(); applyProgress() }, 3000)
             }
         }
+
+        // One-time look at the sidebar markup, written to the log so the sidebar CSS can be matched to it.
+        function dumpSidebar() {
+            ctx.dom.query(".UI-AppSidebar__sidebar").then(function (list) {
+                if (!list.length) { log("sidebar: not found"); return }
+                function walk(el, depth) {
+                    return Promise.resolve(el.getAttribute("class")).then(function (c) {
+                        var line = "<" + (el.tagName || "?") + " class=\"" + String(c || "").slice(0, 70) + "\">"
+                        if (depth >= 4 || typeof el.getChildren !== "function") return line
+                        return Promise.resolve(el.getChildren()).then(function (kids) {
+                            return Promise.all((kids || []).map(function (k) { return walk(k, depth + 1) })).then(function (parts) {
+                                return line + (parts.length ? " [" + parts.join(" ") + "]" : "")
+                            })
+                        })
+                    })
+                }
+                return walk(list[0], 0).then(function (txt) { log("sidebar: " + txt) })
+            }).catch(function (err) { log("sidebar dump failed: " + err) })
+        }
+        if (typeof ctx.setTimeout === "function") ctx.setTimeout(dumpSidebar, 6000)
 
         loadProgress()
         startPlayerWatch()
