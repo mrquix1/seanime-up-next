@@ -336,7 +336,7 @@ function init() {
             var id = Number(hero.mediaId)
             if (isInList(id)) { ctx.toast.info("Already on your list"); return }
             Promise.resolve().then(function () {
-                $anilist.updateEntry(id, "PLANNING", undefined, 0, undefined, undefined)
+                $anilist.updateEntry(id, "PLANNING", 0, 0, undefined, undefined)
             }).then(function () {
                 addedIds[id] = true
                 mediaMapCache = null
@@ -876,6 +876,7 @@ function init() {
             heroTick()
             latestTick()
             applyProgress()
+            tidySidebar()
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -990,28 +991,35 @@ function init() {
                 // watch progress: read the playback position, save it, and draw it on the cards
                 ctx.setInterval(pollProgress, 3000)
                 ctx.setInterval(function () { flushProgress(); applyProgress() }, 3000)
+                ctx.setInterval(tidySidebar, 2000)
             }
         }
 
-        // One-time look at the sidebar markup, written to the log so the sidebar CSS can be matched to it.
-        function dumpSidebar() {
-            ctx.dom.query(".UI-AppSidebar__sidebar").then(function (list) {
-                if (!list.length) { log("sidebar: not found"); return }
-                function walk(el, depth) {
-                    return Promise.resolve(el.getAttribute("class")).then(function (c) {
-                        var line = "<" + (el.tagName || "?") + " class=\"" + String(c || "").slice(0, 70) + "\">"
-                        if (depth >= 4 || typeof el.getChildren !== "function") return line
-                        return Promise.resolve(el.getChildren()).then(function (kids) {
-                            return Promise.all((kids || []).map(function (k) { return walk(k, depth + 1) })).then(function (parts) {
-                                return line + (parts.length ? " [" + parts.join(" ") + "]" : "")
-                            })
-                        })
+        // ---------- Sidebar: keep only a few buttons ----------
+        // Links (by address) that stay in the sidebar. Everything else in the menu is hidden.
+        // The first time it runs, the log shows every sidebar link ("up-next: sidebar: links = ..."),
+        // so you can add or remove addresses here.
+        var SIDEBAR_KEEP = ["/", "/schedule", "/lists", "/discover", "/torrent-list", "/settings"]
+        var sidebarLogged = false
+        var sidebarBusy = false
+
+        function tidySidebar() {
+            if (sidebarBusy) return
+            sidebarBusy = true
+            ctx.dom.query(".UI-AppSidebar__sidebar .UI-VerticalMenu__item").then(function (items) {
+                return Promise.all(items.map(function (it) {
+                    return Promise.resolve(it.getAttribute("href")).then(function (h) { return { it: it, href: String(h || "").split("?")[0].replace(/(.)\/$/, "$1") } })
+                })).then(function (list) {
+                    if (!sidebarLogged && list.length) {
+                        sidebarLogged = true
+                        log("sidebar: links = " + list.map(function (x) { return x.href || "(button)" }).join("  "))
+                    }
+                    list.forEach(function (x) {
+                        if (!x.href || SIDEBAR_KEEP.indexOf(x.href) === -1) x.it.setStyle("display", "none")
                     })
-                }
-                return walk(list[0], 0).then(function (txt) { log("sidebar: " + txt) })
-            }).catch(function (err) { log("sidebar dump failed: " + err) })
+                })
+            }).then(function () { sidebarBusy = false }, function (err) { sidebarBusy = false; log("sidebar tidy failed: " + err) })
         }
-        if (typeof ctx.setTimeout === "function") ctx.setTimeout(dumpSidebar, 6000)
 
         loadProgress()
         startPlayerWatch()
