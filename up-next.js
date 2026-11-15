@@ -22,6 +22,8 @@ function init() {
         var heroBuilding = false
         var heroIndex = 0
         var heroPausedUntil = 0
+        var heroBusy = false          // a hero check is in progress (prevents two checks from both building a hero)
+        var heroCooldownUntil = 0     // short pause after a build so the new hero is in the DOM before the next check
         var hero = null
 
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
@@ -333,20 +335,39 @@ function init() {
             })
         }
 
+        function removeAllHeroes() {
+            return ctx.dom.query("[data-mq-hero]").then(function (list) {
+                list.forEach(function (el) { el.remove() })
+            })
+        }
+
         function heroTick() {
-            if (heroBuilding) return
+            if (heroBusy || heroBuilding || Date.now() < heroCooldownUntil) return
             if (!heroData) {
                 loadHeroData().then(function () { if (heroData) heroTick() })
                 return
             }
+            heroBusy = true
             ctx.dom.query(HERO_ANCHOR).then(function (anchors) {
-                if (!anchors.length) { hero = null; return }          // not on the home screen
-                return ctx.dom.query("[data-mq-hero]").then(function (found) {
-                    if (found.length > 0) return                      // already there
+                if (!anchors.length) {
                     hero = null
-                    return buildHero(anchors[0])
+                    return removeAllHeroes()                          // left the home screen: clean up
+                }
+                return ctx.dom.query("[data-mq-hero]").then(function (found) {
+                    if (found.length === 1) return                    // exactly one hero: all good
+                    if (found.length > 1) log("hero: found " + found.length + " heroes, rebuilding")
+                    found.forEach(function (el) { el.remove() })      // none to clear, or duplicates to clear
+                    hero = null
+                    return buildHero(anchors[0]).then(function () {
+                        heroCooldownUntil = Date.now() + 1500
+                    })
                 })
-            }, function (err) { log("hero tick failed: " + err) })
+            }).then(function () {
+                heroBusy = false
+            }, function (err) {
+                heroBusy = false
+                log("hero tick failed: " + err)
+            })
         }
 
         // ---------- Sync the home screen ----------
