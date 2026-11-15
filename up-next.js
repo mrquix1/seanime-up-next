@@ -25,6 +25,31 @@ function init() {
         var heroBusy = false          // a hero check is in progress (prevents two checks from both building a hero)
         var heroCooldownUntil = 0     // short pause after a build so the new hero is in the DOM before the next check
         var hero = null
+        var addedIds = {}             // anime added to the list through the hero "+" button
+
+        // ---------- Latest Episodes row settings ----------
+        var LATEST_COUNT = 14             // cards in the row
+        var LATEST_DAYS = 7               // how far back to look for aired episodes
+        var LATEST_REFRESH_MS = 900000    // reload the data every 15 minutes
+        var LATEST_ONLY_MY_LIST = false   // true = only show anime that are on your AniList
+        var latestData = null
+        var latestLoading = false
+        var latestLoadedAt = 0
+        var latestRetryAt = 0
+        var latestVersion = 0
+        var latestBusy = false
+        var latestCooldownUntil = 0
+
+        // ---------- Watch progress (badges + red line) ----------
+        var STORAGE_KEY = "up-next.progress"
+        var progressMap = {}          // "mediaId:episode" -> { t: seconds watched, d: duration }
+        var progressDirty = false
+        var progressTracked = {}
+        var progressErrLogged = false
+        var progBusy = false
+        var pathCache = {}            // normalized file path -> { mediaId, ep }
+        var pathMissAt = {}           // normalized file path -> time of the last failed lookup
+        var pathResolving = {}
 
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
 
@@ -140,6 +165,10 @@ function init() {
             return ""
         }
 
+        function normPath(p) {
+            return String(p || "").replace(/\\/g, "/").toLowerCase()
+        }
+
         function openEpisode(mediaId, n) {
             var id = Number(mediaId)
             function fallback() { ctx.screen.navigateTo("/entry", { id: String(id) }) }
@@ -152,6 +181,7 @@ function init() {
                     ctx.toast.info("Episode " + n + " isn't in your library yet")
                     return fallback()
                 }
+                pathCache[normPath(path)] = { mediaId: id, ep: n }   // lets watch progress know what is playing
                 ctx.playback.playUsingMediaPlayer(path)
                 ctx.toast.info("Playing episode " + n)
             }).catch(function (err) {
@@ -240,10 +270,15 @@ function init() {
             return String(s || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
         }
 
+        function isInList(id) {
+            if (addedIds[id]) return true
+            try { return !!getMediaMap()[String(id)] } catch (e) { return false }
+        }
+
         function loadHeroData() {
             if (heroData || heroLoading || Date.now() < heroRetryAt) return Promise.resolve()
             heroLoading = true
-            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } } } }"
+            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } trailer { id site } } } }"
             return fetch("https://graphql.anilist.co", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -277,6 +312,41 @@ function init() {
             hero.desc.setText(stripHtml(m.description))
             hero.dots.forEach(function (d, n) { d.setAttribute("data-active", n === heroIndex ? "true" : "false") })
             hero.mediaId = m.id
+
+            // "+" button: shows a check when the anime is already on your list
+            var inList = isInList(m.id)
+            hero.plus.setText(inList ? "✓" : "+")
+            hero.plus.setAttribute("data-added", inList ? "true" : "false")
+            hero.plus.setAttribute("title", inList ? "On your list" : "Add to your list (Planning)")
+
+            // trailer card
+            var yt = (m.trailer && String(m.trailer.site).toLowerCase() === "youtube" && m.trailer.id) ? String(m.trailer.id) : ""
+            if (yt) {
+                hero.trailer.setAttribute("href", "https://www.youtube.com/watch?v=" + yt)
+                hero.trailerImg.setAttribute("src", "https://img.youtube.com/vi/" + yt + "/hqdefault.jpg")
+                hero.trailer.setStyle("display", "block")
+            } else {
+                hero.trailer.setStyle("display", "none")
+            }
+        }
+
+        function heroAdd() {
+            if (!hero || !hero.mediaId) return
+            var id = Number(hero.mediaId)
+            if (isInList(id)) { ctx.toast.info("Already on your list"); return }
+            Promise.resolve().then(function () {
+                $anilist.updateEntry(id, "PLANNING", undefined, 0, undefined, undefined)
+            }).then(function () {
+                addedIds[id] = true
+                mediaMapCache = null
+                try { $anilist.refreshAnimeCollection() } catch (e) {}
+                ctx.toast.success("Added to your list (Planning)")
+                log("hero: added " + id + " to PLANNING")
+                if (hero) showHero(heroIndex)
+            }).catch(function (err) {
+                log("hero: add to list failed: " + err)
+                ctx.toast.error("Couldn't add to your list: " + err)
+            })
         }
 
         function buildHero(anchor) {
@@ -301,30 +371,43 @@ function init() {
                 mk("button", { "class": "mq-hero-arrow" }),               // 14 prev
                 mk("button", { "class": "mq-hero-arrow" }),               // 15 next
                 mk("div", { "class": "mq-hero-dots" }),                   // 16 dots box
-                Promise.all(dots)                                         // 17 dots
+                Promise.all(dots),                                        // 17 dots
+                mk("button", { "class": "mq-hero-btn mq-hero-plus", "data-added": "false", title: "Add to your list" }), // 18 + button
+                mk("a", { "class": "mq-hero-trailer", target: "_blank", rel: "noopener noreferrer" }),                  // 19 trailer card (link)
+                mk("img", { "class": "mq-hero-trailer-img", alt: "" }),   // 20 trailer thumbnail
+                mk("div", { "class": "mq-hero-trailer-play" }),           // 21 play button
+                mk("span", { "class": "mq-hero-trailer-label" })          // 22 "Trailer" label
             ]).then(function (e) {
                 e[12].setText("Info")
                 e[14].setText("‹")
                 e[15].setText("›")
+                e[18].setText("+")
+                e[22].setText("Trailer")
 
                 e[7].append(e[8]); e[7].append(e[9])
-                e[11].append(e[12])
+                e[11].append(e[12]); e[11].append(e[18])
                 e[17].forEach(function (d) { e[16].append(d) })
                 e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[16])
                 e[3].append(e[4]); e[3].append(e[5])
                 e[13].append(e[14]); e[13].append(e[15])
-                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13])
+                e[19].append(e[20]); e[19].append(e[21]); e[19].append(e[22])
+                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13]); e[0].append(e[19])
 
                 e[12].addEventListener("click", function () {
                     if (hero && hero.mediaId) ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
                 })
+                e[18].addEventListener("click", function () { heroAdd() })
                 e[14].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex - 1) })
                 e[15].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex + 1) })
                 e[17].forEach(function (d, k) {
                     d.addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(k) })
                 })
+                e[19].addEventListener("click", function () { heroPausedUntil = Date.now() + 60000 })
 
-                hero = { root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17], mediaId: 0 }
+                hero = {
+                    root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17],
+                    plus: e[18], trailer: e[19], trailerImg: e[20], mediaId: 0
+                }
                 showHero(heroIndex)
                 anchor.after(e[0])
             }).then(function () {
@@ -367,6 +450,313 @@ function init() {
             }, function (err) {
                 heroBusy = false
                 log("hero tick failed: " + err)
+            })
+        }
+
+        // ---------- Latest Episodes row ----------
+        function timeAgo(ts) {
+            var s = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts))
+            if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m ago"
+            if (s < 86400) return Math.floor(s / 3600) + "h ago"
+            return Math.floor(s / 86400) + "d ago"
+        }
+
+        function loadLatestData() {
+            var fresh = latestData && (Date.now() - latestLoadedAt < LATEST_REFRESH_MS)
+            if (latestLoading || fresh || Date.now() < latestRetryAt) return Promise.resolve()
+            latestLoading = true
+            var now = Math.floor(Date.now() / 1000)
+            var query = "query { Page(page: 1, perPage: 50) { airingSchedules(airingAt_lesser: " + now +
+                ", airingAt_greater: " + (now - LATEST_DAYS * 86400) + ", sort: TIME_DESC) { episode airingAt media { id isAdult countryOfOrigin title { userPreferred } bannerImage coverImage { extraLarge large } } } } }"
+            return fetch("https://graphql.anilist.co", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ query: query })
+            }).then(function (res) {
+                return Promise.resolve(res.json())
+            }).then(function (data) {
+                latestLoading = false
+                var items = (data && data.data && data.data.Page && data.data.Page.airingSchedules) || []
+                var map = {}
+                try { map = getMediaMap() } catch (e) {}
+                var seen = {}
+                var mine = []
+                var rest = []
+                items.forEach(function (s) {
+                    var m = s && s.media
+                    if (!m || m.isAdult || (m.countryOfOrigin && m.countryOfOrigin !== "JP")) return
+                    if (seen[m.id]) return
+                    seen[m.id] = true
+                    var image = m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || ""
+                    if (!image) return
+                    var item = {
+                        id: m.id, title: (m.title && m.title.userPreferred) || "", ep: s.episode, at: s.airingAt, image: image
+                    }
+                    if (map[String(m.id)]) mine.push(item); else rest.push(item)
+                })
+                var out = LATEST_ONLY_MY_LIST ? mine : mine.concat(rest)
+                if (!out.length) { latestRetryAt = Date.now() + 60000; return }
+                latestData = out.slice(0, LATEST_COUNT)
+                latestLoadedAt = Date.now()
+                latestVersion++
+                log("latest: loaded " + latestData.length + " episodes")
+            }, function (err) {
+                latestLoading = false
+                latestRetryAt = Date.now() + 60000
+                log("latest: load failed: " + err)
+            })
+        }
+
+        function buildLatestCard(it) {
+            return Promise.all([
+                mk("div", { "class": "mq-latest-card" }),                                          // 0 card
+                mk("div", { "class": "mq-latest-thumb" }),                                         // 1 thumbnail box
+                mk("img", { "class": "mq-latest-img", alt: "", loading: "lazy", src: it.image }),  // 2 image
+                mk("span", { "class": "mq-latest-badge" }),                                        // 3 episode badge
+                mk("p", { "class": "mq-latest-name" }),                                            // 4 title
+                mk("p", { "class": "mq-latest-sub" })                                              // 5 subtitle
+            ]).then(function (e) {
+                e[3].setText("Episode " + it.ep)
+                e[4].setText(it.title)
+                e[5].setText(timeAgo(it.at))
+                e[1].append(e[2]); e[1].append(e[3])
+                e[0].append(e[1]); e[0].append(e[4]); e[0].append(e[5])
+                e[0].addEventListener("click", function () { ctx.screen.navigateTo("/entry", { id: String(it.id) }) })
+                return e[0]
+            })
+        }
+
+        function buildLatest(anchor, kind) {
+            return Promise.all([
+                mk("div", {
+                    "class": "mq-latest", "data-mq-latest": "1",
+                    "data-mq-latest-v": String(latestVersion), "data-mq-latest-anchor": kind
+                }),                                                       // 0 root
+                mk("h2", { "class": "mq-latest-title" }),                 // 1 heading
+                mk("div", { "class": "mq-latest-row" }),                  // 2 scrolling row
+                Promise.all(latestData.map(buildLatestCard))              // 3 cards
+            ]).then(function (e) {
+                e[1].setText("Latest Episodes")
+                e[3].forEach(function (c) { e[2].append(c) })
+                e[0].append(e[1]); e[0].append(e[2])
+                anchor.after(e[0])
+            })
+        }
+
+        function removeAll(list) {
+            list.forEach(function (el) { el.remove() })
+        }
+
+        function latestTick() {
+            if (latestBusy || Date.now() < latestCooldownUntil) return
+            var stale = !latestData || (Date.now() - latestLoadedAt >= LATEST_REFRESH_MS)
+            if (stale && !latestLoading && Date.now() >= latestRetryAt) {
+                loadLatestData().then(function () { if (latestData) latestTick() })   // runs again once the data is in
+            }
+            if (!latestData) return
+            latestBusy = true
+            Promise.all([
+                ctx.dom.query(HERO_ANCHOR),
+                ctx.dom.query("[data-continue-watching-container]"),
+                ctx.dom.query("[data-mq-hero]"),
+                ctx.dom.query("[data-mq-latest]")
+            ]).then(function (r) {
+                var toolbar = r[0], cw = r[1], heroEl = r[2], found = r[3]
+                if (!toolbar.length) return removeAll(found)              // left the home screen
+                var anchor = cw.length ? cw[0] : (heroEl.length ? heroEl[0] : null)
+                var kind = cw.length ? "cw" : "hero"
+                if (!anchor) return removeAll(found)
+                function rebuild() {
+                    removeAll(found)
+                    return buildLatest(anchor, kind).then(function () { latestCooldownUntil = Date.now() + 1500 })
+                }
+                if (found.length === 1) {
+                    return found[0].getAttributes().then(function (a) {
+                        if (a["data-mq-latest-v"] === String(latestVersion) && a["data-mq-latest-anchor"] === kind) return
+                        return rebuild()
+                    })
+                }
+                return rebuild()
+            }).then(function () {
+                latestBusy = false
+            }, function (err) {
+                latestBusy = false
+                log("latest tick failed: " + err)
+            })
+        }
+
+        // ---------- Watch progress ----------
+        function loadProgress() {
+            try {
+                if (typeof $storage === "undefined") return
+                var raw = $storage.get(STORAGE_KEY)
+                if (!raw) return
+                var obj = typeof raw === "string" ? JSON.parse(raw) : raw
+                if (obj && typeof obj === "object") progressMap = obj
+                log("progress: loaded " + Object.keys(progressMap).length + " saved position(s)")
+            } catch (err) { log("progress: could not load: " + err) }
+        }
+
+        function flushProgress() {
+            if (!progressDirty) return
+            progressDirty = false
+            try {
+                if (typeof $storage !== "undefined") $storage.set(STORAGE_KEY, progressMap)
+            } catch (err) { log("progress: could not save: " + err) }
+        }
+
+        function fmtTime(sec) {
+            sec = Math.max(0, Math.floor(Number(sec) || 0))
+            var h = Math.floor(sec / 3600)
+            var m = Math.floor((sec % 3600) / 60)
+            var s = sec % 60
+            function pad(n) { return n < 10 ? "0" + n : String(n) }
+            return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s)
+        }
+
+        function unwrap(val) {
+            if (val && typeof val === "object" && val.data !== undefined) return val.data
+            return val
+        }
+
+        // Which shows could this file belong to? The ones you're currently watching.
+        function watchingCandidates() {
+            var out = []
+            try {
+                var collection = $anilist.getAnimeCollection(false)
+                var lists = (collection && collection.MediaListCollection && collection.MediaListCollection.lists) || []
+                lists.forEach(function (list) {
+                    var st = list && String(list.status)
+                    if (st !== "CURRENT" && st !== "REPEATING") return
+                    ;(list.entries || []).forEach(function (entry) {
+                        if (entry && entry.media) out.push({ mediaId: Number(entry.media.id), progress: Number(entry.progress) || 0 })
+                    })
+                })
+            } catch (err) {}
+            return out
+        }
+
+        function resolvePath(path) {
+            var np = normPath(path)
+            if (pathCache[np]) return Promise.resolve(pathCache[np])
+            if (pathMissAt[np] && Date.now() - pathMissAt[np] < 30000) return Promise.resolve(null)
+            if (pathResolving[np]) return pathResolving[np]
+            var candidates = watchingCandidates()
+            var found = null
+            var chain = Promise.resolve()
+            candidates.forEach(function (c) {
+                chain = chain.then(function () {
+                    if (found) return
+                    return Promise.resolve(ctx.anime.getAnimeEntry(c.mediaId)).then(function (entry) {
+                        for (var n = Math.max(1, c.progress); n <= c.progress + 4; n++) {
+                            var p = findLocalPath(entry, n)
+                            if (p && normPath(p) === np) { found = { mediaId: c.mediaId, ep: n }; return }
+                        }
+                    }, function () {})
+                })
+            })
+            var p = chain.then(function () {
+                delete pathResolving[np]
+                if (found) { pathCache[np] = found; log("progress: now playing media " + found.mediaId + " ep " + found.ep) }
+                else pathMissAt[np] = Date.now()
+                return found
+            })
+            pathResolving[np] = p
+            return p
+        }
+
+        function pollProgress() {
+            var conn
+            try { conn = ctx.mpv.getConnection() } catch (e) { conn = null }
+            if (!conn || conn.isClosed()) return
+            function get(prop) {
+                return Promise.resolve().then(function () { return conn.get(prop) }).then(unwrap)
+            }
+            Promise.all([get("path"), get("time-pos"), get("duration")]).then(function (v) {
+                var path = v[0]
+                var t = Number(v[1])
+                var d = Number(v[2])
+                if (!path || !isFinite(t) || !isFinite(d) || d <= 0 || t < 0) return
+                return resolvePath(String(path)).then(function (info) {
+                    if (!info) return
+                    var key = info.mediaId + ":" + info.ep
+                    if (t / d >= 0.92) {                     // finished: Seanime moves on, so drop the saved position
+                        if (progressMap[key]) { delete progressMap[key]; progressDirty = true }
+                        return
+                    }
+                    var prev = progressMap[key]
+                    if (!prev || Math.abs(prev.t - t) >= 5 || prev.d !== Math.round(d)) {
+                        progressMap[key] = { t: Math.floor(t), d: Math.round(d) }
+                        progressDirty = true
+                        if (!progressTracked[key]) { progressTracked[key] = true; log("progress: tracking " + key + " at " + fmtTime(t) + "/" + fmtTime(d)) }
+                    }
+                })
+            }).catch(function (err) {
+                if (!progressErrLogged) { progressErrLogged = true; log("progress poll failed: " + err) }
+            })
+        }
+
+        function upsertProgress(mid, ep, key, pr, pct) {
+            var label = fmtTime(pr.t) + "/" + fmtTime(pr.d)
+            return ctx.dom.query('.mq-progress-fill[data-mq-key="' + key + '"]').then(function (fills) {
+                if (fills.length) {
+                    fills.forEach(function (f) { f.setStyle("width", pct + "%") })
+                    return ctx.dom.query('.mq-time-badge[data-mq-key="' + key + '"]').then(function (badges) {
+                        badges.forEach(function (b) { b.setText(label) })
+                    })
+                }
+                var target = '[data-episode-card][data-media-id="' + mid + '"][data-episode-number="' + ep + '"] [class*="bottom-0 left-0 w-full"]'
+                return ctx.dom.query(target).then(function (boxes) {
+                    if (!boxes.length) return
+                    return Promise.all([
+                        mk("span", { "class": "mq-progress-track", "data-mq-key": key }),
+                        mk("span", { "class": "mq-progress-fill", "data-mq-key": key }, { width: pct + "%" }),
+                        mk("span", { "class": "mq-time-badge", "data-mq-key": key })
+                    ]).then(function (e) {
+                        e[2].setText(label)
+                        e[0].append(e[1])
+                        boxes[0].append(e[0])
+                        boxes[0].append(e[2])
+                    })
+                })
+            })
+        }
+
+        function applyProgress() {
+            if (progBusy) return
+            progBusy = true
+            ctx.dom.query(SELECTOR).then(function (cards) {
+                return Promise.all(cards.map(function (c) { return c.getAttributes() })).then(function (all) {
+                    var active = {}
+                    var work = Promise.resolve()
+                    all.forEach(function (a) {
+                        var mid = a["data-media-id"]
+                        var ep = a["data-episode-number"]
+                        if (!mid || !ep) return
+                        var key = mid + ":" + ep
+                        var pr = progressMap[key]
+                        if (!pr || !pr.d) return
+                        var pct = Math.max(0, Math.min(100, Math.round(pr.t / pr.d * 1000) / 10))
+                        if (pct < 1) return
+                        active[key] = true
+                        work = work.then(function () { return upsertProgress(mid, ep, key, pr, pct) })
+                    })
+                    return work.then(function () {
+                        // remove leftovers whose card no longer shows that episode
+                        return ctx.dom.query("[data-mq-key]").then(function (els) {
+                            return Promise.all(els.map(function (el) {
+                                return el.getAttribute("data-mq-key").then(function (k) {
+                                    if (!active[k]) el.remove()
+                                })
+                            }))
+                        })
+                    })
+                })
+            }).then(function () {
+                progBusy = false
+            }, function (err) {
+                progBusy = false
+                log("progress apply failed: " + err)
             })
         }
 
@@ -472,6 +862,8 @@ function init() {
 
         function tick(reason) {
             heroTick()
+            latestTick()
+            applyProgress()
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -583,9 +975,13 @@ function init() {
             if (typeof ctx.setInterval === "function") {
                 ctx.setInterval(pollMpv, 2000)
                 ctx.setInterval(askVideoCore, 4000)
+                // watch progress: read the playback position, save it, and draw it on the cards
+                ctx.setInterval(pollProgress, 3000)
+                ctx.setInterval(function () { flushProgress(); applyProgress() }, 3000)
             }
         }
 
+        loadProgress()
         startPlayerWatch()
 
         // ---------- Tray panel ----------
