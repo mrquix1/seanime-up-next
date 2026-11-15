@@ -14,6 +14,10 @@ function init() {
 
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
 
+        function show(x) {
+            try { var t = JSON.stringify(x); return t === undefined ? String(x) : t.slice(0, 500) } catch (e) { return String(x) }
+        }
+
         // ---------- AniList lookup ----------
         function loadMediaMap() {
             var map = {}
@@ -352,6 +356,81 @@ function init() {
 
             tick("ready")
         })
+
+        // ---------- Player settings: learning mode ----------
+        // Watches mpv (MpvCore) and logs changes to subtitles, audio and Anime4K, so we can see
+        // exactly what changes. The next step turns this into "remember and re-apply".
+        var MPV_PROPS = ["path", "sid", "secondary-sid", "sub-visibility", "aid", "glsl-shaders"]
+        var mpvLast = {}
+        var mpvFailed = {}
+        var mpvConnected = false
+        var mpvSeenEvents = {}
+
+        function pollMpv() {
+            var conn
+            try { conn = ctx.mpv.getConnection() } catch (e) { conn = null }
+            if (!conn || conn.isClosed()) {
+                if (mpvConnected) { mpvConnected = false; mpvLast = {}; log("mpv connection gone") }
+                return
+            }
+            if (!mpvConnected) { mpvConnected = true; log("mpv connection found") }
+            MPV_PROPS.forEach(function (prop) {
+                Promise.resolve().then(function () { return conn.get(prop) }).then(function (val) {
+                    var s = show(val)
+                    if (mpvLast[prop] !== s) {
+                        log("mpv " + prop + " = " + s + (mpvLast[prop] === undefined ? "" : "   (was " + mpvLast[prop] + ")"))
+                        mpvLast[prop] = s
+                    }
+                }, function (err) {
+                    if (!mpvFailed[prop]) { mpvFailed[prop] = true; log("mpv get " + prop + " failed: " + err) }
+                })
+            })
+        }
+
+        function askVideoCore() {
+            try {
+                if (!ctx.videoCore.getCurrentClientId()) return
+                ctx.videoCore.sendGetAnime4K()
+                ctx.videoCore.sendGetSubtitleTrack()
+                ctx.videoCore.sendGetAudioTrack()
+            } catch (err) {}
+        }
+
+        function startPlayerWatch() {
+            // log each distinct kind of mpv event once (the stream itself is very chatty)
+            try {
+                ctx.mpv.onEvent(function (event, closed) {
+                    if (closed) { log("mpv event stream closed"); return }
+                    var name = (event && (event.event || event.name)) || "unknown"
+                    if (!mpvSeenEvents[name]) {
+                        mpvSeenEvents[name] = true
+                        log("mpv event type '" + name + "': " + show(event))
+                    }
+                })
+            } catch (err) {
+                log("mpv onEvent failed: " + err)
+            }
+
+            // in case the player also reports through VideoCore
+            var VC_EVENTS = [
+                "video-loaded", "video-can-play", "video-anime-4k",
+                "video-subtitle-track", "video-audio-track", "video-media-caption-track"
+            ]
+            VC_EVENTS.forEach(function (name) {
+                try {
+                    ctx.videoCore.addEventListener(name, function (event) { log("videocore " + name + " -> " + show(event)) })
+                } catch (err) {
+                    log("cannot listen to " + name + ": " + err)
+                }
+            })
+
+            if (typeof ctx.setInterval === "function") {
+                ctx.setInterval(pollMpv, 2000)
+                ctx.setInterval(askVideoCore, 4000)
+            }
+        }
+
+        startPlayerWatch()
 
         // ---------- Tray panel ----------
         var tray = ctx.newTray({
