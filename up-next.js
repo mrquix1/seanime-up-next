@@ -12,6 +12,18 @@ function init() {
         var episodeCache = {}
         var mediaMapCache = null
 
+        // ---------- Hero banner settings ----------
+        var HERO_COUNT = 8            // how many anime the hero rotates through
+        var HERO_ROTATE_MS = 9000     // auto-advance time
+        var HERO_ANCHOR = "[data-home-toolbar-container]"   // the hero is inserted right after this element
+        var heroData = null
+        var heroLoading = false
+        var heroRetryAt = 0
+        var heroBuilding = false
+        var heroIndex = 0
+        var heroPausedUntil = 0
+        var hero = null
+
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
 
         function show(x) {
@@ -221,6 +233,122 @@ function init() {
             })
         }
 
+        // ---------- Hero banner ----------
+        function stripHtml(s) {
+            return String(s || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+        }
+
+        function loadHeroData() {
+            if (heroData || heroLoading || Date.now() < heroRetryAt) return Promise.resolve()
+            heroLoading = true
+            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } } } }"
+            return fetch("https://graphql.anilist.co", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ query: query })
+            }).then(function (res) {
+                return Promise.resolve(res.json())
+            }).then(function (data) {
+                var list = (data && data.data && data.data.Page && data.data.Page.media) || []
+                var withBanner = list.filter(function (m) { return m && m.bannerImage })
+                heroLoading = false
+                if (!withBanner.length) { heroRetryAt = Date.now() + 60000; return }
+                heroData = withBanner.slice(0, HERO_COUNT)
+                log("hero: loaded " + heroData.length + " anime")
+            }, function (err) {
+                heroLoading = false
+                heroRetryAt = Date.now() + 60000
+                log("hero: load failed: " + err)
+            })
+        }
+
+        function showHero(i) {
+            if (!hero || !heroData || !heroData.length) return
+            heroIndex = (i + heroData.length) % heroData.length
+            var m = heroData[heroIndex]
+            var score = m.averageScore ? (m.averageScore / 10).toFixed(1) : ""
+            hero.bg.setStyle("background-image", 'url("' + m.bannerImage + '")')
+            hero.cover.setAttribute("src", (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "")
+            hero.title.setText((m.title && m.title.userPreferred) || "")
+            hero.genres.setText((m.genres || []).slice(0, 3).join(" • "))
+            hero.score.setText(score ? "★ " + score : "")
+            hero.desc.setText(stripHtml(m.description))
+            hero.dots.forEach(function (d, n) { d.setAttribute("data-active", n === heroIndex ? "true" : "false") })
+            hero.mediaId = m.id
+        }
+
+        function buildHero(anchor) {
+            heroBuilding = true
+            var dots = []
+            for (var i = 0; i < heroData.length; i++) dots.push(mk("span", { "class": "mq-hero-dot", "data-active": "false" }))
+            return Promise.all([
+                mk("div", { "class": "mq-hero", "data-mq-hero": "1" }),   // 0 root
+                mk("div", { "class": "mq-hero-bg" }),                     // 1 background image
+                mk("div", { "class": "mq-hero-fade" }),                   // 2 gradients
+                mk("div", { "class": "mq-hero-content" }),                // 3 content row
+                mk("img", { "class": "mq-hero-cover", alt: "" }),         // 4 cover
+                mk("div", { "class": "mq-hero-text" }),                   // 5 text column
+                mk("h1", { "class": "mq-hero-title" }),                   // 6 title
+                mk("div", { "class": "mq-hero-meta" }),                   // 7 meta row
+                mk("span", {}),                                           // 8 genres
+                mk("span", {}),                                           // 9 score
+                mk("p", { "class": "mq-hero-desc" }),                     // 10 synopsis
+                mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons
+                mk("button", { "class": "mq-hero-btn" }),                 // 12 info
+                mk("div", { "class": "mq-hero-nav" }),                    // 13 arrows box
+                mk("button", { "class": "mq-hero-arrow" }),               // 14 prev
+                mk("button", { "class": "mq-hero-arrow" }),               // 15 next
+                mk("div", { "class": "mq-hero-dots" }),                   // 16 dots box
+                Promise.all(dots)                                         // 17 dots
+            ]).then(function (e) {
+                e[12].setText("Info")
+                e[14].setText("‹")
+                e[15].setText("›")
+
+                e[7].append(e[8]); e[7].append(e[9])
+                e[11].append(e[12])
+                e[17].forEach(function (d) { e[16].append(d) })
+                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[16])
+                e[3].append(e[4]); e[3].append(e[5])
+                e[13].append(e[14]); e[13].append(e[15])
+                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13])
+
+                e[12].addEventListener("click", function () {
+                    if (hero && hero.mediaId) ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
+                })
+                e[14].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex - 1) })
+                e[15].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex + 1) })
+                e[17].forEach(function (d, k) {
+                    d.addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(k) })
+                })
+
+                hero = { root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17], mediaId: 0 }
+                showHero(heroIndex)
+                anchor.after(e[0])
+            }).then(function () {
+                heroBuilding = false
+            }, function (err) {
+                heroBuilding = false
+                log("hero build failed: " + err)
+            })
+        }
+
+        function heroTick() {
+            if (heroBuilding) return
+            if (!heroData) {
+                loadHeroData().then(function () { if (heroData) heroTick() })
+                return
+            }
+            ctx.dom.query(HERO_ANCHOR).then(function (anchors) {
+                if (!anchors.length) { hero = null; return }          // not on the home screen
+                return ctx.dom.query("[data-mq-hero]").then(function (found) {
+                    if (found.length > 0) return                      // already there
+                    hero = null
+                    return buildHero(anchors[0])
+                })
+            }, function (err) { log("hero tick failed: " + err) })
+        }
+
         // ---------- Sync the home screen ----------
         var runId = 0            // every new run supersedes the previous one
         var running = false
@@ -322,6 +450,7 @@ function init() {
         }
 
         function tick(reason) {
+            heroTick()
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -338,6 +467,12 @@ function init() {
             ctx.dom.observe(SELECTOR, function () { tick("observe") })
 
             if (typeof ctx.setInterval === "function") {
+                // hero auto-advance
+                ctx.setInterval(function () {
+                    if (!hero || !heroData || heroData.length < 2 || Date.now() < heroPausedUntil) return
+                    try { showHero(heroIndex + 1) } catch (err) {}
+                }, HERO_ROTATE_MS)
+
                 ctx.setInterval(function () { tick("poll") }, REFRESH_MS)
             } else {
                 log("ctx.setInterval is not available, relying on observe and navigation only")
