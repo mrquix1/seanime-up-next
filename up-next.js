@@ -25,31 +25,6 @@ function init() {
         var heroBusy = false          // a hero check is in progress (prevents two checks from both building a hero)
         var heroCooldownUntil = 0     // short pause after a build so the new hero is in the DOM before the next check
         var hero = null
-        var addedIds = {}             // anime added to the list through the hero "+" button
-
-        // ---------- Latest Episodes row settings ----------
-        var LATEST_COUNT = 14             // cards in the row
-        var LATEST_DAYS = 7               // how far back to look for aired episodes
-        var LATEST_REFRESH_MS = 900000    // reload the data every 15 minutes
-        var LATEST_ONLY_MY_LIST = false   // true = only show anime that are on your AniList
-        var latestData = null
-        var latestLoading = false
-        var latestLoadedAt = 0
-        var latestRetryAt = 0
-        var latestVersion = 0
-        var latestBusy = false
-        var latestCooldownUntil = 0
-
-        // ---------- Watch progress (badges + red line) ----------
-        var STORAGE_KEY = "up-next.progress"
-        var progressMap = {}          // "mediaId:episode" -> { t: seconds watched, d: duration }
-        var progressDirty = false
-        var progressTracked = {}
-        var progressErrLogged = false
-        var progBusy = false
-        var pathCache = {}            // normalized file path -> { mediaId, ep }
-        var pathMissAt = {}           // normalized file path -> time of the last failed lookup
-        var pathResolving = {}
 
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
 
@@ -70,8 +45,7 @@ function init() {
                         title: (m.title && m.title.userPreferred) || "",
                         image: m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "",
                         releasing: String(m.status) === "RELEASING",
-                        nextAiring: (m.nextAiringEpisode && Number(m.nextAiringEpisode.episode)) || 0,
-                        progress: Number(entry.progress) || 0
+                        nextAiring: (m.nextAiringEpisode && Number(m.nextAiringEpisode.episode)) || 0
                     }
                 })
             })
@@ -166,10 +140,6 @@ function init() {
             return ""
         }
 
-        function normPath(p) {
-            return String(p || "").replace(/\\/g, "/").toLowerCase()
-        }
-
         function openEpisode(mediaId, n) {
             var id = Number(mediaId)
             function fallback() { ctx.screen.navigateTo("/entry", { id: String(id) }) }
@@ -182,7 +152,6 @@ function init() {
                     ctx.toast.info("Episode " + n + " isn't in your library yet")
                     return fallback()
                 }
-                pathCache[normPath(path)] = { mediaId: id, ep: n }   // lets watch progress know what is playing
                 ctx.playback.playUsingMediaPlayer(path)
                 ctx.toast.info("Playing episode " + n)
             }).catch(function (err) {
@@ -239,8 +208,8 @@ function init() {
                 })                                                                                                // 16 play triangle
             ]).then(function (e) {
                 e[7].setText(epTitle || "Up next")
-                e[10].setText("EP " + ep)
-                e[11].setText("")
+                e[10].setText("Episode " + ep)
+                e[11].setText(total ? " / " + total : "")
                 e[12].setText(info.title ? "- " + info.title : "")
                 e[13].setText(runtime)
 
@@ -271,15 +240,10 @@ function init() {
             return String(s || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
         }
 
-        function isInList(id) {
-            if (addedIds[id]) return true
-            try { return !!getMediaMap()[String(id)] } catch (e) { return false }
-        }
-
         function loadHeroData() {
             if (heroData || heroLoading || Date.now() < heroRetryAt) return Promise.resolve()
             heroLoading = true
-            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } episodes duration } } }"
+            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } } } }"
             return fetch("https://graphql.anilist.co", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -309,45 +273,10 @@ function init() {
             hero.cover.setAttribute("src", (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "")
             hero.title.setText((m.title && m.title.userPreferred) || "")
             hero.genres.setText((m.genres || []).slice(0, 3).join(" • "))
-            hero.score.setText(score)
+            hero.score.setText(score ? "★ " + score : "")
             hero.desc.setText(stripHtml(m.description))
             hero.dots.forEach(function (d, n) { d.setAttribute("data-active", n === heroIndex ? "true" : "false") })
             hero.mediaId = m.id
-
-            // "+" button: shows a check when the anime is already on your list
-            var inList = isInList(m.id)
-            hero.plus.setText(inList ? "✓" : "+")
-            hero.plus.setAttribute("data-added", inList ? "true" : "false")
-            hero.plus.setAttribute("title", inList ? "On your list" : "Add to your list (Planning)")
-
-            // episode card on the right: "Episode N / total" + runtime
-            var mine = null
-            try { mine = getMediaMap()[String(m.id)] } catch (e) {}
-            var nextEp = mine ? mine.progress + 1 : 1
-            if (m.episodes && nextEp > m.episodes) nextEp = m.episodes
-            hero.epNumber = nextEp
-            hero.epLabel.setText("Episode " + nextEp + (m.episodes ? " / " + m.episodes : ""))
-            hero.epRuntime.setText(m.duration ? m.duration + "m" : "")
-            hero.epImg.setAttribute("src", m.bannerImage || "")
-        }
-
-        function heroAdd() {
-            if (!hero || !hero.mediaId) return
-            var id = Number(hero.mediaId)
-            if (isInList(id)) { ctx.toast.info("Already on your list"); return }
-            Promise.resolve().then(function () {
-                $anilist.updateEntry(id, "PLANNING", 0, 0, undefined, undefined)
-            }).then(function () {
-                addedIds[id] = true
-                mediaMapCache = null
-                try { $anilist.refreshAnimeCollection() } catch (e) {}
-                ctx.toast.success("Added to your list (Planning)")
-                log("hero: added " + id + " to PLANNING")
-                if (hero) showHero(heroIndex)
-            }).catch(function (err) {
-                log("hero: add to list failed: " + err)
-                ctx.toast.error("Couldn't add to your list: " + err)
-            })
         }
 
         function buildHero(anchor) {
@@ -364,57 +293,38 @@ function init() {
                 mk("h1", { "class": "mq-hero-title" }),                   // 6 title
                 mk("div", { "class": "mq-hero-meta" }),                   // 7 meta row
                 mk("span", {}),                                           // 8 genres
-                mk("span", { "class": "mq-hero-score" }),                    // 9 score
+                mk("span", {}),                                           // 9 score
                 mk("p", { "class": "mq-hero-desc" }),                     // 10 synopsis
-                mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons row
+                mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons
                 mk("button", { "class": "mq-hero-btn" }),                 // 12 info
                 mk("div", { "class": "mq-hero-nav" }),                    // 13 arrows box
                 mk("button", { "class": "mq-hero-arrow" }),               // 14 prev
                 mk("button", { "class": "mq-hero-arrow" }),               // 15 next
                 mk("div", { "class": "mq-hero-dots" }),                   // 16 dots box
-                Promise.all(dots),                                        // 17 dots
-                mk("button", { "class": "mq-hero-btn mq-hero-plus", "data-added": "false", title: "Add to your list" }), // 18 + button
-                mk("div", { "class": "mq-hero-ep" }),                     // 19 episode card
-                mk("img", { "class": "mq-hero-ep-img", alt: "" }),        // 20 episode thumbnail
-                mk("div", { "class": "mq-hero-ep-shade" }),               // 21 dark gradient
-                mk("div", { "class": "mq-hero-ep-play" }),                // 22 play triangle
-                mk("span", { "class": "mq-hero-ep-label" }),              // 23 "Episode N / T"
-                mk("span", { "class": "mq-hero-ep-runtime" })             // 24 "24m"
+                Promise.all(dots)                                         // 17 dots
             ]).then(function (e) {
-                e[12].setText("ⓘ  Info")
-                e[14].setText("←")
-                e[15].setText("→")
-                e[18].setText("+")
+                e[12].setText("Info")
+                e[14].setText("‹")
+                e[15].setText("›")
 
                 e[7].append(e[8]); e[7].append(e[9])
+                e[11].append(e[12])
                 e[17].forEach(function (d) { e[16].append(d) })
-                e[11].append(e[12]); e[11].append(e[18]); e[11].append(e[16])
-                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11])
+                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[16])
                 e[3].append(e[4]); e[3].append(e[5])
                 e[13].append(e[14]); e[13].append(e[15])
-                e[19].append(e[20]); e[19].append(e[21]); e[19].append(e[22]); e[19].append(e[23]); e[19].append(e[24])
-                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13]); e[0].append(e[19])
+                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13])
 
                 e[12].addEventListener("click", function () {
                     if (hero && hero.mediaId) ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
                 })
-                e[18].addEventListener("click", function () { heroAdd() })
                 e[14].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex - 1) })
                 e[15].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex + 1) })
                 e[17].forEach(function (d, k) {
                     d.addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(k) })
                 })
-                // episode card: play the next episode if the show is on your list, otherwise open its page
-                e[19].addEventListener("click", function () {
-                    if (!hero || !hero.mediaId) return
-                    if (isInList(hero.mediaId)) openEpisode(hero.mediaId, hero.epNumber || 1)
-                    else ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
-                })
 
-                hero = {
-                    root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17],
-                    plus: e[18], epImg: e[20], epLabel: e[23], epRuntime: e[24], epNumber: 1, mediaId: 0
-                }
+                hero = { root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17], mediaId: 0 }
                 showHero(heroIndex)
                 anchor.after(e[0])
             }).then(function () {
@@ -457,347 +367,6 @@ function init() {
             }, function (err) {
                 heroBusy = false
                 log("hero tick failed: " + err)
-            })
-        }
-
-        // ---------- Latest Episodes row ----------
-        function timeAgo(ts) {
-            var s = Math.max(0, Math.floor(Date.now() / 1000) - Number(ts))
-            if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m ago"
-            if (s < 86400) return Math.floor(s / 3600) + "h ago"
-            return Math.floor(s / 86400) + "d ago"
-        }
-
-        function loadLatestData() {
-            var fresh = latestData && (Date.now() - latestLoadedAt < LATEST_REFRESH_MS)
-            if (latestLoading || fresh || Date.now() < latestRetryAt) return Promise.resolve()
-            latestLoading = true
-            var now = Math.floor(Date.now() / 1000)
-            var query = "query { Page(page: 1, perPage: 50) { airingSchedules(airingAt_lesser: " + now +
-                ", airingAt_greater: " + (now - LATEST_DAYS * 86400) + ", sort: TIME_DESC) { episode airingAt media { id isAdult countryOfOrigin title { userPreferred } bannerImage coverImage { extraLarge large } } } } }"
-            return fetch("https://graphql.anilist.co", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Accept": "application/json" },
-                body: JSON.stringify({ query: query })
-            }).then(function (res) {
-                return Promise.resolve(res.json())
-            }).then(function (data) {
-                latestLoading = false
-                var items = (data && data.data && data.data.Page && data.data.Page.airingSchedules) || []
-                var map = {}
-                try { map = getMediaMap() } catch (e) {}
-                var seen = {}
-                var mine = []
-                var rest = []
-                items.forEach(function (s) {
-                    var m = s && s.media
-                    if (!m || m.isAdult || (m.countryOfOrigin && m.countryOfOrigin !== "JP")) return
-                    if (seen[m.id]) return
-                    seen[m.id] = true
-                    var image = m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || ""
-                    if (!image) return
-                    var item = {
-                        id: m.id, title: (m.title && m.title.userPreferred) || "", ep: s.episode, at: s.airingAt, image: image
-                    }
-                    if (map[String(m.id)]) mine.push(item); else rest.push(item)
-                })
-                var out = LATEST_ONLY_MY_LIST ? mine : mine.concat(rest)
-                if (!out.length) { latestRetryAt = Date.now() + 60000; return }
-                latestData = out.slice(0, LATEST_COUNT)
-                latestLoadedAt = Date.now()
-                latestVersion++
-                log("latest: loaded " + latestData.length + " episodes")
-            }, function (err) {
-                latestLoading = false
-                latestRetryAt = Date.now() + 60000
-                log("latest: load failed: " + err)
-            })
-        }
-
-        function buildLatestCard(it) {
-            return Promise.all([
-                mk("div", { "class": "mq-latest-card" }),                                          // 0 card
-                mk("div", { "class": "mq-latest-thumb" }),                                         // 1 thumbnail box
-                mk("img", { "class": "mq-latest-img", alt: "", loading: "lazy", src: it.image }),  // 2 image
-                mk("span", { "class": "mq-latest-badge" }),                                        // 3 episode badge
-                mk("p", { "class": "mq-latest-name" }),                                            // 4 title
-                mk("p", { "class": "mq-latest-sub" })                                              // 5 subtitle
-            ]).then(function (e) {
-                e[3].setText("Episode " + it.ep)
-                e[4].setText(it.title)
-                e[5].setText(timeAgo(it.at))
-                e[1].append(e[2]); e[1].append(e[3])
-                e[0].append(e[1]); e[0].append(e[4]); e[0].append(e[5])
-                e[0].addEventListener("click", function () { ctx.screen.navigateTo("/entry", { id: String(it.id) }) })
-                return e[0]
-            })
-        }
-
-        function buildLatest(anchor, kind) {
-            return Promise.all([
-                mk("div", {
-                    "class": "mq-latest", "data-mq-latest": "1",
-                    "data-mq-latest-v": String(latestVersion), "data-mq-latest-anchor": kind
-                }),                                                       // 0 root
-                mk("h2", { "class": "mq-latest-title" }),                 // 1 heading
-                mk("div", { "class": "mq-latest-row" }),                  // 2 scrolling row
-                Promise.all(latestData.map(buildLatestCard)),             // 3 cards
-                mk("div", { "class": "mq-latest-head" }),                 // 4 heading row
-                mk("span", { "class": "mq-latest-more" })                 // 5 "View more"
-            ]).then(function (e) {
-                e[1].setText("Latest Episodes")
-                e[5].setText("View more ›")
-                e[5].addEventListener("click", function () { ctx.screen.navigateTo("/schedule") })
-                e[3].forEach(function (c) { e[2].append(c) })
-                e[4].append(e[1]); e[4].append(e[5])
-                e[0].append(e[4]); e[0].append(e[2])
-                anchor.after(e[0])
-            })
-        }
-
-        function removeAll(list) {
-            list.forEach(function (el) { el.remove() })
-        }
-
-        function latestTick() {
-            if (latestBusy || Date.now() < latestCooldownUntil) return
-            var stale = !latestData || (Date.now() - latestLoadedAt >= LATEST_REFRESH_MS)
-            if (stale && !latestLoading && Date.now() >= latestRetryAt) {
-                loadLatestData().then(function () { if (latestData) latestTick() })   // runs again once the data is in
-            }
-            if (!latestData) return
-            latestBusy = true
-            Promise.all([
-                ctx.dom.query(HERO_ANCHOR),
-                ctx.dom.query("[data-continue-watching-container]"),
-                ctx.dom.query("[data-mq-hero]"),
-                ctx.dom.query("[data-mq-latest]")
-            ]).then(function (r) {
-                var toolbar = r[0], cw = r[1], heroEl = r[2], found = r[3]
-                if (!toolbar.length) return removeAll(found)              // left the home screen
-                var anchor = cw.length ? cw[0] : (heroEl.length ? heroEl[0] : null)
-                var kind = cw.length ? "cw" : "hero"
-                if (!anchor) return removeAll(found)
-                function rebuild() {
-                    removeAll(found)
-                    return buildLatest(anchor, kind).then(function () { latestCooldownUntil = Date.now() + 1500 })
-                }
-                if (found.length === 1) {
-                    return found[0].getAttributes().then(function (a) {
-                        if (a["data-mq-latest-v"] === String(latestVersion) && a["data-mq-latest-anchor"] === kind) return
-                        return rebuild()
-                    })
-                }
-                return rebuild()
-            }).then(function () {
-                latestBusy = false
-            }, function (err) {
-                latestBusy = false
-                log("latest tick failed: " + err)
-            })
-        }
-
-        // ---------- Watch progress ----------
-        function loadProgress() {
-            try {
-                if (typeof $storage === "undefined") return
-                var raw = $storage.get(STORAGE_KEY)
-                if (!raw) return
-                var obj = typeof raw === "string" ? JSON.parse(raw) : raw
-                if (obj && typeof obj === "object") progressMap = obj
-                log("progress: loaded " + Object.keys(progressMap).length + " saved position(s)")
-            } catch (err) { log("progress: could not load: " + err) }
-        }
-
-        function flushProgress() {
-            if (!progressDirty) return
-            progressDirty = false
-            try {
-                if (typeof $storage !== "undefined") $storage.set(STORAGE_KEY, progressMap)
-            } catch (err) { log("progress: could not save: " + err) }
-        }
-
-        function fmtTime(sec) {
-            sec = Math.max(0, Math.floor(Number(sec) || 0))
-            var h = Math.floor(sec / 3600)
-            var m = Math.floor((sec % 3600) / 60)
-            var s = sec % 60
-            function pad(n) { return n < 10 ? "0" + n : String(n) }
-            return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s)
-        }
-
-        function unwrap(val) {
-            if (val && typeof val === "object" && val.data !== undefined) return val.data
-            return val
-        }
-
-        // Which shows could this file belong to? The ones you're currently watching.
-        function watchingCandidates() {
-            var out = []
-            try {
-                var collection = $anilist.getAnimeCollection(false)
-                var lists = (collection && collection.MediaListCollection && collection.MediaListCollection.lists) || []
-                lists.forEach(function (list) {
-                    var st = list && String(list.status)
-                    if (st !== "CURRENT" && st !== "REPEATING") return
-                    ;(list.entries || []).forEach(function (entry) {
-                        if (entry && entry.media) out.push({ mediaId: Number(entry.media.id), progress: Number(entry.progress) || 0 })
-                    })
-                })
-            } catch (err) {}
-            return out
-        }
-
-        function resolvePath(path) {
-            var np = normPath(path)
-            if (pathCache[np]) return Promise.resolve(pathCache[np])
-            if (pathMissAt[np] && Date.now() - pathMissAt[np] < 30000) return Promise.resolve(null)
-            if (pathResolving[np]) return pathResolving[np]
-            var candidates = watchingCandidates()
-            var found = null
-            var chain = Promise.resolve()
-            candidates.forEach(function (c) {
-                chain = chain.then(function () {
-                    if (found) return
-                    return Promise.resolve(ctx.anime.getAnimeEntry(c.mediaId)).then(function (entry) {
-                        for (var n = Math.max(1, c.progress); n <= c.progress + 4; n++) {
-                            var p = findLocalPath(entry, n)
-                            if (p && normPath(p) === np) { found = { mediaId: c.mediaId, ep: n }; return }
-                        }
-                    }, function () {})
-                })
-            })
-            var p = chain.then(function () {
-                delete pathResolving[np]
-                if (found) { pathCache[np] = found; log("progress: now playing media " + found.mediaId + " ep " + found.ep) }
-                else pathMissAt[np] = Date.now()
-                return found
-            })
-            pathResolving[np] = p
-            return p
-        }
-
-        function pollProgress() {
-            var conn
-            try { conn = ctx.mpv.getConnection() } catch (e) { conn = null }
-            if (!conn || conn.isClosed()) return
-            function get(prop) {
-                return Promise.resolve().then(function () { return conn.get(prop) }).then(unwrap)
-            }
-            Promise.all([get("path"), get("time-pos"), get("duration")]).then(function (v) {
-                var path = v[0]
-                var t = Number(v[1])
-                var d = Number(v[2])
-                if (!path || !isFinite(t) || !isFinite(d) || d <= 0 || t < 0) return
-                return resolvePath(String(path)).then(function (info) {
-                    if (!info) return
-                    var key = info.mediaId + ":" + info.ep
-                    if (t / d >= 0.92) {                     // finished: Seanime moves on, so drop the saved position
-                        if (progressMap[key]) { delete progressMap[key]; progressDirty = true }
-                        return
-                    }
-                    var prev = progressMap[key]
-                    if (!prev || Math.abs(prev.t - t) >= 5 || prev.d !== Math.round(d)) {
-                        progressMap[key] = { t: Math.floor(t), d: Math.round(d) }
-                        progressDirty = true
-                        if (!progressTracked[key]) { progressTracked[key] = true; log("progress: tracking " + key + " at " + fmtTime(t) + "/" + fmtTime(d)) }
-                    }
-                })
-            }).catch(function (err) {
-                if (!progressErrLogged) { progressErrLogged = true; log("progress poll failed: " + err) }
-            })
-        }
-
-        function upsertProgress(mid, ep, key, pr, pct) {
-            var label = fmtTime(pr.t) + "/" + fmtTime(pr.d)
-            return ctx.dom.query('.mq-progress-fill[data-mq-key="' + key + '"]').then(function (fills) {
-                if (fills.length) {
-                    fills.forEach(function (f) { f.setStyle("width", pct + "%") })
-                    return ctx.dom.query('.mq-time-badge[data-mq-key="' + key + '"]').then(function (badges) {
-                        badges.forEach(function (b) { b.setText(label) })
-                    })
-                }
-                var target = '[data-episode-card][data-media-id="' + mid + '"][data-episode-number="' + ep + '"] [class*="bottom-0 left-0 w-full"]'
-                return ctx.dom.query(target).then(function (boxes) {
-                    if (!boxes.length) return
-                    return Promise.all([
-                        mk("span", { "class": "mq-progress-track", "data-mq-key": key }),
-                        mk("span", { "class": "mq-progress-fill", "data-mq-key": key }, { width: pct + "%" }),
-                        mk("span", { "class": "mq-time-badge", "data-mq-key": key })
-                    ]).then(function (e) {
-                        e[2].setText(label)
-                        e[0].append(e[1])
-                        boxes[0].append(e[0])
-                        boxes[0].append(e[2])
-                    })
-                })
-            })
-        }
-
-        function upsertEpBadge(mid, ep, key) {
-            return ctx.dom.query('.mq-ep-badge[data-mq-ep="' + key + '"]').then(function (found) {
-                if (found.length) return
-                var target = '[data-episode-card][data-media-id="' + mid + '"][data-episode-number="' + ep + '"] [class*="bottom-0 left-0 w-full"]'
-                return ctx.dom.query(target).then(function (boxes) {
-                    if (!boxes.length) return
-                    return mk("span", { "class": "mq-ep-badge", "data-mq-ep": key }).then(function (b) {
-                        b.setText("EP " + ep)
-                        boxes[0].append(b)
-                    })
-                })
-            })
-        }
-
-        function applyProgress() {
-            if (progBusy) return
-            progBusy = true
-            ctx.dom.query(SELECTOR).then(function (cards) {
-                return Promise.all(cards.map(function (c) { return c.getAttributes() })).then(function (all) {
-                    var active = {}
-                    var epActive = {}
-                    var work = Promise.resolve()
-                    all.forEach(function (a) {
-                        var m = a["data-media-id"], n = a["data-episode-number"]
-                        if (!m || !n) return
-                        epActive[m + ":" + n] = true
-                        work = work.then(function () { return upsertEpBadge(m, n, m + ":" + n) })
-                    })
-                    all.forEach(function (a) {
-                        var mid = a["data-media-id"]
-                        var ep = a["data-episode-number"]
-                        if (!mid || !ep) return
-                        var key = mid + ":" + ep
-                        var pr = progressMap[key]
-                        if (!pr || !pr.d) return
-                        var pct = Math.max(0, Math.min(100, Math.round(pr.t / pr.d * 1000) / 10))
-                        if (pct < 1) return
-                        active[key] = true
-                        work = work.then(function () { return upsertProgress(mid, ep, key, pr, pct) })
-                    })
-                    return work.then(function () {
-                        // remove leftovers whose card no longer shows that episode
-                        return ctx.dom.query("[data-mq-key]").then(function (els) {
-                            return Promise.all(els.map(function (el) {
-                                return el.getAttribute("data-mq-key").then(function (k) {
-                                    if (!active[k]) el.remove()
-                                })
-                            }))
-                        })
-                    }).then(function () {
-                        return ctx.dom.query("[data-mq-ep]").then(function (els) {
-                            return Promise.all(els.map(function (el) {
-                                return el.getAttribute("data-mq-ep").then(function (k) {
-                                    if (!epActive[k]) el.remove()
-                                })
-                            }))
-                        })
-                    })
-                })
-            }).then(function () {
-                progBusy = false
-            }, function (err) {
-                progBusy = false
-                log("progress apply failed: " + err)
             })
         }
 
@@ -903,9 +472,6 @@ function init() {
 
         function tick(reason) {
             heroTick()
-            latestTick()
-            applyProgress()
-            navTick()
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -934,7 +500,6 @@ function init() {
             }
 
             ctx.screen.onNavigate(function (e) {
-                if (e && e.pathname) { currentPath = e.pathname; setNavActive() }
                 if (e && e.pathname === "/") {
                     tick("navigate")
                     if (typeof ctx.setTimeout === "function") {
@@ -945,7 +510,6 @@ function init() {
                 }
             })
 
-            try { if (typeof ctx.screen.loadCurrent === "function") ctx.screen.loadCurrent() } catch (err) {}
             tick("ready")
         })
 
@@ -1019,70 +583,9 @@ function init() {
             if (typeof ctx.setInterval === "function") {
                 ctx.setInterval(pollMpv, 2000)
                 ctx.setInterval(askVideoCore, 4000)
-                // watch progress: read the playback position, save it, and draw it on the cards
-                ctx.setInterval(pollProgress, 3000)
-                ctx.setInterval(function () { flushProgress(); applyProgress() }, 3000)
-                ctx.setInterval(navTick, 2000)
             }
         }
 
-        // ---------- Sidebar: our own navigation (6 buttons) ----------
-        // The plugin adds these buttons to the sidebar. The CSS hides Seanime's own menu once they exist.
-        // Change the list to add, remove or reorder buttons (icons: calendar, home, compass, library, download, settings).
-        var NAV = [
-            { href: "/schedule", icon: "calendar", title: "Schedule" },
-            { href: "/", icon: "home", title: "Home" },
-            { href: "/discover", icon: "compass", title: "Discover" },
-            { href: "/lists", icon: "library", title: "My lists" },
-            { href: "/torrent-list", icon: "download", title: "Torrent list" },
-            { href: "/settings", icon: "settings", title: "Settings" }
-        ]
-        var navBusy = false
-        var currentPath = "/"
-
-        function setNavActive() {
-            ctx.dom.query("[data-mq-href]").then(function (items) {
-                items.forEach(function (it) {
-                    it.getAttribute("data-mq-href").then(function (h) {
-                        var on = h === "/" ? currentPath === "/" : (currentPath === h || currentPath.indexOf(h + "/") === 0)
-                        it.setAttribute("data-active", on ? "true" : "false")
-                    })
-                })
-            }).catch(function () {})
-        }
-
-        function buildNav(sidebar) {
-            var parts = [mk("div", { "class": "mq-nav", "data-mq-nav": "1" })]
-            NAV.forEach(function (n) {
-                parts.push(Promise.all([
-                    mk("button", { "class": "mq-nav-item", "data-mq-href": n.href, "data-active": "false", title: n.title }),
-                    mk("span", { "class": "mq-nav-icon", "data-icon": n.icon })
-                ]))
-            })
-            return Promise.all(parts).then(function (p) {
-                var root = p[0]
-                NAV.forEach(function (n, i) {
-                    var pair = p[i + 1]
-                    pair[0].append(pair[1])
-                    pair[0].addEventListener("click", function () { currentPath = n.href; setNavActive(); ctx.screen.navigateTo(n.href) })
-                    root.append(pair[0])
-                })
-                sidebar.append(root)
-            }).then(function () { setNavActive() })
-        }
-
-        function navTick() {
-            if (navBusy) return
-            navBusy = true
-            Promise.all([ctx.dom.query(".UI-AppSidebar__sidebar"), ctx.dom.query("[data-mq-nav]")]).then(function (r) {
-                if (!r[0].length) return
-                if (r[1].length === 1) return
-                r[1].forEach(function (el) { el.remove() })
-                return buildNav(r[0][0])
-            }).then(function () { navBusy = false }, function (err) { navBusy = false; log("nav failed: " + err) })
-        }
-
-        loadProgress()
         startPlayerWatch()
 
         // ---------- Tray panel ----------
