@@ -25,6 +25,30 @@ function init() {
         var heroBusy = false          // a hero check is in progress (prevents two checks from both building a hero)
         var heroCooldownUntil = 0     // short pause after a build so the new hero is in the DOM before the next check
         var hero = null
+        var heroAdded = {}            // anime ids added to the planning list from the hero (until Seanime refreshes its own list)
+
+        // ---------- Latest episodes row settings ----------
+        var LATEST_COUNT = 14                 // cards in the row
+        var LATEST_DAYS = 3                   // how far back to look for aired episodes
+        var LATEST_MIN_POPULARITY = 8000      // hides obscure shows (lower it to see more)
+        var LATEST_REFRESH_MS = 30 * 60 * 1000
+        var latestData = null
+        var latestAt = 0
+        var latestLoading = false
+        var latestRetryAt = 0
+        var latestDirty = false
+        var latestBusy = false
+        var latestBuilding = false
+        var latestCooldownUntil = 0
+        var latestNoAnchorTicks = 0
+
+        // ---------- Watch progress ----------
+        var progressBusy = false
+        var progressCooldownUntil = 0
+        var entryCache = {}
+        var pathCache = {}
+        var lastSavedPos = {}
+        var lastExtrasTick = 0
 
         function log(msg) { if (DEBUG) console.log("up-next: " + msg) }
 
@@ -179,10 +203,11 @@ function init() {
                     role: "group",
                     "data-up-next-for": String(mediaId),
                     "data-up-next-base": String(baseEp),
+                    "data-up-next-ep": String(ep),
                     "class": "UI-Carousel__item min-w-0 shrink-0 grow-0 basis-full pl-4 md:basis-1/2 lg:basis-1/2 2xl:basis-1/3 min-[2000px]:basis-1/4"
                 }),                                                                                              // 0 slide
                 mk("div", { "class": "rounded-xl space-y-2 flex-none group/episode-card cursor-pointer select-none w-full" }), // 1 card
-                mk("div", { "class": "w-full h-full rounded-xl overflow-hidden z-[1] aspect-[4/2] relative bg-[--background]" }), // 2 image box
+                mk("div", { "class": "w-full h-full rounded-xl overflow-hidden z-[1] aspect-[4/2] relative bg-[--background]", "data-mq-imgbox": "1" }), // 2 image box
                 mk("img", {
                     alt: "", decoding: "async", loading: "lazy", src: image,
                     "class": "object-cover rounded-xl object-center transition-[opacity,transform] ease-out duration-400 opacity-100 scale-100 lg:group-hover/episode-card:scale-[1.02]"
@@ -207,6 +232,7 @@ function init() {
                     "border-left": "22px solid rgba(17,24,39,0.85)", "margin-left": "6px"
                 })                                                                                                // 16 play triangle
             ]).then(function (e) {
+                if (ep - baseEp <= 3) e[0].setAttribute("data-up-next-near", "1")   // the next few cards get watch progress
                 e[7].setText(epTitle || "Up next")
                 e[10].setText("Episode " + ep)
                 e[11].setText(total ? " / " + total : "")
@@ -240,10 +266,15 @@ function init() {
             return String(s || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
         }
 
+        // keeps odd characters out of CSS url("...") values
+        function cssUrl(u) {
+            return 'url("' + String(u || "").replace(/["'()\\\r\n]/g, "") + '")'
+        }
+
         function loadHeroData() {
             if (heroData || heroLoading || Date.now() < heroRetryAt) return Promise.resolve()
             heroLoading = true
-            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage coverImage { extraLarge large } } } }"
+            var query = "query { Page(page: 1, perPage: 20) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { id title { userPreferred } genres averageScore description(asHtml: false) bannerImage duration episodes trailer { id site } coverImage { extraLarge large } } } }"
             return fetch("https://graphql.anilist.co", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -264,17 +295,56 @@ function init() {
             })
         }
 
+        function heroInList(id) {
+            if (heroAdded[String(id)]) return true
+            try { return !!getMediaMap()[String(id)] } catch (err) { return false }
+        }
+
+        function addToPlanning(id) {
+            var key = String(id)
+            if (heroInList(key)) { ctx.toast.info("Already in your list"); return }
+            try {
+                $anilist.updateEntry(Number(id), "PLANNING", undefined, undefined, undefined, undefined)
+                heroAdded[key] = true
+                mediaMapCache = null
+                try { $anilist.refreshAnimeCollection() } catch (e) {}
+                ctx.toast.info("Added to your planning list")
+                if (hero && hero.mediaId === id) showHero(heroIndex)
+            } catch (err) {
+                log("hero: add to list failed: " + err)
+                ctx.toast.info("Couldn't add this anime to your list")
+            }
+        }
+
         function showHero(i) {
             if (!hero || !heroData || !heroData.length) return
             heroIndex = (i + heroData.length) % heroData.length
             var m = heroData[heroIndex]
             var score = m.averageScore ? (m.averageScore / 10).toFixed(1) : ""
-            hero.bg.setStyle("background-image", 'url("' + m.bannerImage + '")')
+            hero.bg.setStyle("background-image", cssUrl(m.bannerImage))
             hero.cover.setAttribute("src", (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "")
             hero.title.setText((m.title && m.title.userPreferred) || "")
             hero.genres.setText((m.genres || []).slice(0, 3).join(" • "))
             hero.score.setText(score ? "★ " + score : "")
             hero.desc.setText(stripHtml(m.description))
+
+            var inList = heroInList(m.id)
+            hero.plus.setText(inList ? "✓" : "+")
+            hero.plus.setAttribute("title", inList ? "In your list" : "Add to planning")
+
+            var trailerId = ""
+            if (m.trailer && String(m.trailer.site).toLowerCase() === "youtube" && /^[A-Za-z0-9_-]{6,20}$/.test(String(m.trailer.id || ""))) {
+                trailerId = String(m.trailer.id)
+            }
+            if (trailerId) {
+                hero.trailer.setAttribute("href", "https://www.youtube.com/watch?v=" + trailerId)
+                hero.thumb.setStyle("background-image", cssUrl("https://img.youtube.com/vi/" + trailerId + "/hqdefault.jpg"))
+                hero.tdur.setText(m.duration ? m.duration + "m" : "")
+                hero.trailer.setStyle("display", "block")
+            } else {
+                hero.trailer.setStyle("display", "none")
+            }
+
             hero.dots.forEach(function (d, n) { d.setAttribute("data-active", n === heroIndex ? "true" : "false") })
             hero.mediaId = m.id
         }
@@ -297,34 +367,49 @@ function init() {
                 mk("p", { "class": "mq-hero-desc" }),                     // 10 synopsis
                 mk("div", { "class": "mq-hero-buttons" }),                // 11 buttons
                 mk("button", { "class": "mq-hero-btn" }),                 // 12 info
-                mk("div", { "class": "mq-hero-nav" }),                    // 13 arrows box
-                mk("button", { "class": "mq-hero-arrow" }),               // 14 prev
-                mk("button", { "class": "mq-hero-arrow" }),               // 15 next
-                mk("div", { "class": "mq-hero-dots" }),                   // 16 dots box
-                Promise.all(dots)                                         // 17 dots
+                mk("button", { "class": "mq-hero-plus" }),                // 13 plus
+                mk("div", { "class": "mq-hero-nav" }),                    // 14 arrows box
+                mk("button", { "class": "mq-hero-arrow" }),               // 15 prev
+                mk("button", { "class": "mq-hero-arrow" }),               // 16 next
+                mk("div", { "class": "mq-hero-dots" }),                   // 17 dots box
+                Promise.all(dots),                                        // 18 dots
+                mk("a", { "class": "mq-hero-trailer", href: "#", target: "_blank", rel: "noopener noreferrer" }), // 19 trailer card
+                mk("div", { "class": "mq-hero-trailer-thumb" }),          // 20 trailer thumbnail
+                mk("div", { "class": "mq-hero-trailer-play" }),           // 21 play icon
+                mk("span", { "class": "mq-hero-trailer-label" }),         // 22 label
+                mk("span", { "class": "mq-hero-trailer-dur" })            // 23 duration
             ]).then(function (e) {
                 e[12].setText("Info")
-                e[14].setText("‹")
-                e[15].setText("›")
+                e[13].setText("+")
+                e[15].setText("‹")
+                e[16].setText("›")
+                e[22].setText("Trailer")
 
                 e[7].append(e[8]); e[7].append(e[9])
-                e[11].append(e[12])
-                e[17].forEach(function (d) { e[16].append(d) })
-                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[16])
+                e[11].append(e[12]); e[11].append(e[13])
+                e[18].forEach(function (d) { e[17].append(d) })
+                e[5].append(e[6]); e[5].append(e[7]); e[5].append(e[10]); e[5].append(e[11]); e[5].append(e[17])
                 e[3].append(e[4]); e[3].append(e[5])
-                e[13].append(e[14]); e[13].append(e[15])
-                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[13])
+                e[14].append(e[15]); e[14].append(e[16])
+                e[19].append(e[20]); e[19].append(e[21]); e[19].append(e[22]); e[19].append(e[23])
+                e[0].append(e[1]); e[0].append(e[2]); e[0].append(e[3]); e[0].append(e[19]); e[0].append(e[14])
 
                 e[12].addEventListener("click", function () {
                     if (hero && hero.mediaId) ctx.screen.navigateTo("/entry", { id: String(hero.mediaId) })
                 })
-                e[14].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex - 1) })
-                e[15].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex + 1) })
-                e[17].forEach(function (d, k) {
+                e[13].addEventListener("click", function () {
+                    if (hero && hero.mediaId) addToPlanning(hero.mediaId)
+                })
+                e[15].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex - 1) })
+                e[16].addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(heroIndex + 1) })
+                e[18].forEach(function (d, k) {
                     d.addEventListener("click", function () { heroPausedUntil = Date.now() + 20000; showHero(k) })
                 })
 
-                hero = { root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10], dots: e[17], mediaId: 0 }
+                hero = {
+                    root: e[0], bg: e[1], cover: e[4], title: e[6], genres: e[8], score: e[9], desc: e[10],
+                    plus: e[13], dots: e[18], trailer: e[19], thumb: e[20], tdur: e[23], mediaId: 0
+                }
                 showHero(heroIndex)
                 anchor.after(e[0])
             }).then(function () {
@@ -367,6 +452,337 @@ function init() {
             }, function (err) {
                 heroBusy = false
                 log("hero tick failed: " + err)
+            })
+        }
+
+        // ---------- Small helpers ----------
+        function safeRun(fn) {
+            try { fn() } catch (err) { log("task failed: " + err) }
+        }
+
+        // ---------- Latest episodes row ----------
+        function agoLabel(airingAt) {
+            var mins = Math.max(0, Math.floor((Date.now() / 1000 - airingAt) / 60))
+            if (mins < 60) return Math.max(1, mins) + "m ago"
+            var h = Math.floor(mins / 60)
+            if (h < 24) return h + "h ago"
+            return Math.floor(h / 24) + "d ago"
+        }
+
+        function loadLatest() {
+            if (latestLoading || Date.now() < latestRetryAt) return Promise.resolve()
+            latestLoading = true
+            var now = Math.floor(Date.now() / 1000)
+            var from = now - LATEST_DAYS * 86400
+            var query = "query { Page(page: 1, perPage: 50) { airingSchedules(airingAt_greater: " + from + ", airingAt_lesser: " + now + ", sort: TIME_DESC) { episode airingAt media { id title { userPreferred } bannerImage popularity isAdult coverImage { extraLarge large } } } } }"
+            return fetch("https://graphql.anilist.co", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ query: query })
+            }).then(function (res) {
+                return Promise.resolve(res.json())
+            }).then(function (data) {
+                latestLoading = false
+                var list = (data && data.data && data.data.Page && data.data.Page.airingSchedules) || []
+                var seen = {}
+                var all = []
+                list.forEach(function (sch) {
+                    var m = sch && sch.media
+                    if (!m || m.isAdult || seen[m.id]) return
+                    seen[m.id] = true
+                    all.push({
+                        id: m.id,
+                        title: (m.title && m.title.userPreferred) || "",
+                        image: m.bannerImage || (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || "",
+                        ep: sch.episode,
+                        airingAt: sch.airingAt,
+                        pop: m.popularity || 0
+                    })
+                })
+                var picked = all.filter(function (x) { return x.pop >= LATEST_MIN_POPULARITY })
+                if (picked.length < 6) {
+                    // quiet period: fall back to the most popular of what aired, still newest first
+                    picked = all.slice().sort(function (a, b) { return b.pop - a.pop }).slice(0, LATEST_COUNT)
+                        .sort(function (a, b) { return b.airingAt - a.airingAt })
+                }
+                if (!picked.length) { latestRetryAt = Date.now() + 60000; return }
+                latestData = picked.slice(0, LATEST_COUNT)
+                latestAt = Date.now()
+                latestDirty = true
+                log("latest: loaded " + latestData.length + " episodes")
+            }, function (err) {
+                latestLoading = false
+                latestRetryAt = Date.now() + 60000
+                log("latest: load failed: " + err)
+            })
+        }
+
+        function buildLatestCard(item) {
+            return Promise.all([
+                mk("div", { "class": "mq-latest-card" }),                                              // 0
+                mk("div", { "class": "mq-latest-img" }, { "background-image": cssUrl(item.image) }),   // 1
+                mk("span", { "class": "mq-latest-ep" }),                                               // 2
+                mk("span", { "class": "mq-latest-ago" }),                                              // 3
+                mk("p", { "class": "mq-latest-name" })                                                 // 4
+            ]).then(function (e) {
+                e[2].setText("EP " + item.ep)
+                e[3].setText(agoLabel(item.airingAt))
+                e[4].setText(item.title)
+                e[1].append(e[2]); e[1].append(e[3])
+                e[0].append(e[1]); e[0].append(e[4])
+                e[0].addEventListener("click", function () { ctx.screen.navigateTo("/entry", { id: String(item.id) }) })
+                return e[0]
+            })
+        }
+
+        function buildLatest(anchor) {
+            latestBuilding = true
+            var cards = latestData.map(function (item) { return buildLatestCard(item) })
+            return Promise.all([
+                mk("div", { "class": "mq-latest", "data-mq-latest": "1" }),   // 0 root
+                mk("div", { "class": "mq-latest-head" }),                     // 1 header
+                mk("h2", { "class": "mq-latest-title" }),                     // 2 title
+                mk("button", { "class": "mq-latest-more" }),                  // 3 view more
+                mk("div", { "class": "mq-latest-row" }),                      // 4 row
+                Promise.all(cards)                                            // 5 cards
+            ]).then(function (e) {
+                e[2].setText("Latest episodes")
+                e[3].setText("View more ›")
+                e[3].addEventListener("click", function () { ctx.screen.navigateTo("/schedule") })
+                e[1].append(e[2]); e[1].append(e[3])
+                e[5].forEach(function (c) { e[4].append(c) })
+                e[0].append(e[1]); e[0].append(e[4])
+                anchor.after(e[0])
+            }).then(function () {
+                latestBuilding = false
+            }, function (err) {
+                latestBuilding = false
+                log("latest build failed: " + err)
+            })
+        }
+
+        function removeAllLatest() {
+            return ctx.dom.query("[data-mq-latest]").then(function (list) {
+                list.forEach(function (el) { el.remove() })
+            })
+        }
+
+        function latestTick() {
+            if (latestBusy || latestBuilding || Date.now() < latestCooldownUntil) return
+            if (!latestData || Date.now() - latestAt > LATEST_REFRESH_MS) {
+                var hadData = !!latestData
+                loadLatest().then(function () { if (!hadData && latestData) latestTick() })
+                if (!latestData) return
+                // stale but usable: carry on with the old data, the refresh rebuilds the row when it lands
+            }
+            latestBusy = true
+            Promise.all([ctx.dom.query("[data-continue-watching-container]"), ctx.dom.query("[data-mq-hero]"), ctx.dom.query(HERO_ANCHOR)]).then(function (r) {
+                var cw = r[0]
+                var hr = r[1]
+                var anchor = null
+                if (!r[2].length) {
+                    latestNoAnchorTicks = 0
+                    return removeAllLatest()                           // the home toolbar is gone: we left the home screen
+                }
+                if (cw.length) {
+                    anchor = cw[0]
+                    latestNoAnchorTicks = 0
+                } else if (hr.length) {
+                    latestNoAnchorTicks++                              // no Continue watching row: use the hero after a few checks
+                    if (latestNoAnchorTicks >= 3) anchor = hr[0]
+                } else {
+                    latestNoAnchorTicks = 0
+                    return removeAllLatest()                           // not on the home screen
+                }
+                if (!anchor) return
+                return ctx.dom.query("[data-mq-latest]").then(function (found) {
+                    if (found.length === 1 && !latestDirty) return
+                    found.forEach(function (el) { el.remove() })
+                    latestDirty = false
+                    return buildLatest(anchor).then(function () {
+                        latestCooldownUntil = Date.now() + 1500
+                    })
+                })
+            }).then(function () {
+                latestBusy = false
+            }, function (err) {
+                latestBusy = false
+                log("latest tick failed: " + err)
+            })
+        }
+
+        // ---------- Watch progress (resume position on the cards) ----------
+        function hashStr(str) {
+            var h = 5381
+            for (var i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0
+            return h.toString(36)
+        }
+
+        function posKey(path) {
+            return "pos:" + hashStr(String(path || "").replace(/\\/g, "/").toLowerCase())
+        }
+
+        function fmtTime(sec) {
+            sec = Math.max(0, Math.floor(sec))
+            var h = Math.floor(sec / 3600)
+            var m = Math.floor((sec % 3600) / 60)
+            var s = sec % 60
+            return (h > 0 ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (s < 10 ? "0" : "") + s
+        }
+
+        // remembers where you stopped, read from mpv every few seconds while it plays
+        function trackPlayback() {
+            var conn
+            try { conn = ctx.mpv.getConnection() } catch (e) { conn = null }
+            if (!conn || conn.isClosed()) return
+            Promise.all([
+                Promise.resolve().then(function () { return conn.get("path") }),
+                Promise.resolve().then(function () { return conn.get("time-pos") }),
+                Promise.resolve().then(function () { return conn.get("duration") })
+            ]).then(function (v) {
+                var path = v[0]
+                var t = Number(v[1])
+                var d = Number(v[2])
+                if (!path || !isFinite(t) || !isFinite(d) || d <= 0 || t < 0) return
+                var key = posKey(path)
+                var prev = lastSavedPos[key]
+                if (prev !== undefined && Math.abs(t - prev) < 5) return
+                lastSavedPos[key] = t
+                try {
+                    $storage.set(key, { t: Math.floor(t), d: Math.floor(d), u: Date.now() })
+                } catch (err) {
+                    log("could not save position: " + err)
+                }
+            }, function () {})
+        }
+
+        function getSavedPosition(path) {
+            if (!path) return null
+            var p
+            try { p = $storage.get(posKey(path)) } catch (err) { return null }
+            if (!p || !p.d || !(p.t >= 10)) return null
+            if (p.t / p.d > 0.92) return null            // basically finished
+            return p
+        }
+
+        function getEntryCached(id) {
+            var c = entryCache[id]
+            if (c && Date.now() - c.at < 60000) return Promise.resolve(c.entry)
+            return Promise.resolve().then(function () {
+                return ctx.anime.getAnimeEntry(Number(id))
+            }).then(function (entry) {
+                entryCache[id] = { at: Date.now(), entry: entry }
+                return entry
+            })
+        }
+
+        function cachedPath(id, ep, entry) {
+            var k = id + ":" + ep
+            var c = pathCache[k]
+            if (c && Date.now() - c.at < 60000) return c.path
+            var p = findLocalPath(entry, ep)
+            pathCache[k] = { at: Date.now(), path: p }
+            return p
+        }
+
+        function createProgress(key, w) {
+            return Promise.all([
+                mk("div", { "class": "mq-prog-track", "data-mq-prog": key }),
+                mk("div", { "class": "mq-prog-bar", "data-mq-prog-bar": key }, { width: w.pct + "%" }),
+                mk("span", { "class": "mq-prog-time", "data-mq-prog-time": key }),
+                ctx.dom.query(w.box)
+            ]).then(function (e) {
+                if (!e[3].length) return
+                e[2].setText(w.label)
+                e[0].append(e[1])
+                e[3][0].append(e[0])
+                e[3][0].append(e[2])
+            })
+        }
+
+        function reconcileProgress(wanted) {
+            return ctx.dom.query("[data-mq-prog]").then(function (found) {
+                return Promise.all(found.map(function (el) {
+                    return el.getAttribute("data-mq-prog").then(function (k) { return { el: el, k: k } })
+                }))
+            }).then(function (existing) {
+                var count = {}
+                existing.forEach(function (x) { count[x.k] = (count[x.k] || 0) + 1 })
+                var ops = []
+                existing.forEach(function (x) {
+                    var w = wanted[x.k]
+                    if (!w || count[x.k] > 1) {
+                        // no longer wanted, or duplicated: remove (duplicates get recreated cleanly on the next check)
+                        x.el.remove()
+                        ops.push(ctx.dom.query('[data-mq-prog-time="' + x.k + '"]').then(function (l) {
+                            l.forEach(function (t) { t.remove() })
+                        }))
+                        return
+                    }
+                    ops.push(ctx.dom.query('[data-mq-prog-bar="' + x.k + '"]').then(function (l) {
+                        l.forEach(function (b) { b.setStyle("width", w.pct + "%") })
+                    }))
+                    ops.push(ctx.dom.query('[data-mq-prog-time="' + x.k + '"]').then(function (l) {
+                        l.forEach(function (t) { t.setText(w.label) })
+                    }))
+                })
+                Object.keys(wanted).forEach(function (k) {
+                    if (count[k]) return
+                    ops.push(createProgress(k, wanted[k]))
+                })
+                return Promise.all(ops)
+            })
+        }
+
+        function decorateProgress() {
+            if (progressBusy || Date.now() < progressCooldownUntil) return
+            progressBusy = true
+            var nativeCount = 0
+            Promise.all([ctx.dom.query(SELECTOR), ctx.dom.query('[data-up-next-near="1"]')]).then(function (r) {
+                nativeCount = r[0].length
+                return Promise.all(r[0].concat(r[1]).map(function (el) { return el.getAttributes() }))
+            }).then(function (attrs) {
+                var cards = []
+                attrs.forEach(function (a, i) {
+                    var id, ep, box
+                    if (i < nativeCount) {
+                        id = a["data-media-id"]
+                        ep = parseInt(a["data-episode-number"], 10)
+                        box = '[data-continue-watching-container] [data-episode-card][data-media-id="' + id + '"][data-episode-number="' + ep + '"] [data-episode-card-image-container]'
+                    } else {
+                        id = a["data-up-next-for"]
+                        ep = parseInt(a["data-up-next-ep"], 10)
+                        box = '[data-up-next-for="' + id + '"][data-up-next-ep="' + ep + '"] [data-mq-imgbox]'
+                    }
+                    if (id && !isNaN(ep)) cards.push({ id: id, ep: ep, box: box })
+                })
+                var ids = {}
+                cards.forEach(function (c) { ids[c.id] = true })
+                return Promise.all(Object.keys(ids).map(function (id) {
+                    return getEntryCached(id).then(function (entry) { return { id: id, entry: entry } }, function () { return { id: id, entry: null } })
+                })).then(function (entries) {
+                    var byId = {}
+                    entries.forEach(function (x) { byId[x.id] = x.entry })
+                    var wanted = {}
+                    cards.forEach(function (c) {
+                        var pos = getSavedPosition(cachedPath(c.id, c.ep, byId[c.id]))
+                        if (!pos) return
+                        wanted[c.id + ":" + c.ep] = {
+                            box: c.box,
+                            pct: Math.min(100, Math.round(pos.t / pos.d * 100)),
+                            label: fmtTime(pos.t) + "/" + fmtTime(pos.d)
+                        }
+                    })
+                    return wanted
+                })
+            }).then(function (wanted) {
+                return reconcileProgress(wanted)
+            }).then(function () {
+                progressBusy = false
+                progressCooldownUntil = Date.now() + 1500
+            }, function (err) {
+                progressBusy = false
+                log("progress failed: " + err)
             })
         }
 
@@ -472,6 +888,12 @@ function init() {
 
         function tick(reason) {
             heroTick()
+            var nowTs = Date.now()
+            if (nowTs - lastExtrasTick > 1500) {
+                lastExtrasTick = nowTs
+                safeRun(latestTick)
+                safeRun(decorateProgress)
+            }
             ctx.dom.query(SELECTOR).then(function (cards) {
                 var sig = cards.map(function (c) { return String(c.id) }).join(",")
                 var stuck = running && (Date.now() - runStarted > STUCK_MS)
@@ -583,6 +1005,7 @@ function init() {
             if (typeof ctx.setInterval === "function") {
                 ctx.setInterval(pollMpv, 2000)
                 ctx.setInterval(askVideoCore, 4000)
+                ctx.setInterval(trackPlayback, 3000)
             }
         }
 
