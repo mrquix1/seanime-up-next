@@ -1,8 +1,8 @@
 {
-    "version": "0.3.1",
+    "version": "0.4.0",
     "id": "up-next",
     "name": "Up Next",
-    "description": "Shows the next few episodes of each show you're currently watching, plus a hero banner on the home screen",
+    "description": "Shows the next few episodes of each show you're currently watching, plus a hero banner, Latest Episodes row and watch progress on the home screen",
     "manifestURI": "https://raw.githubusercontent.com/mrquix1/seanime-up-next/main/up-next.json",
     "language": "javascript",
     "type": "plugin",
